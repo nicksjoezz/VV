@@ -14,7 +14,7 @@
   },
   "wallet": {
     "private_key": "YOUR_PRIVATE_KEY_HERE",
-    "arb_contract": "DEPLOY_CONTRACT_ADDRESS_HERE"
+    "arb_contract": "0xEB26Ff6155176A1BDe123DB19A622ff2282E91EC"
   },
   "tokens": {
     "USDC": {
