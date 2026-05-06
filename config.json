@@ -1,0 +1,48 @@
+{
+  "network": {
+    "rpc_http": "https://arb1.arbitrum.io/rpc",
+    "rpc_ws": "wss://arb1.arbitrum.io/ws",
+    "alchemy_keys": [
+      "9fVR5rZUC-g2L5zbeywTA",
+      "CcLjEBHdIqeri3KR6CzSu",
+      "g0Mank73kn2CRetJh7emu"
+    ],
+    "chain_id": 42161,
+    "chain_name": "Arbitrum One",
+    "weth": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    "multicall3": "0xcA11bde05977b3631167028862bE2a173976CA11"
+  },
+  "wallet": {
+    "private_key": "YOUR_PRIVATE_KEY_HERE",
+    "arb_contract": "DEPLOY_CONTRACT_ADDRESS_HERE"
+  },
+  "tokens": {
+    "USDC": {
+      "address": "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",
+      "decimals": 6
+    },
+    "WETH": {
+      "address": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+      "decimals": 18
+    }
+  },
+  "strategy": {
+    "min_profit_usd": 20.0,
+    "max_gas_usd": 5.0
+  },
+  "gas": {
+    "max_fee_per_gas_gwei": 2.0,
+    "max_priority_fee_gwei": 0.2,
+    "gas_limit": 500000
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/bot.log",
+    "max_bytes": 10485760,
+    "backup_count": 5
+  },
+  "mode": "simulate",
+  "swap": {
+    "slippage_bps": 50
+  }
+}

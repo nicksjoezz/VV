@@ -1,0 +1,439 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block page_title %}<span>BOT</span> SETTINGS{% endblock %}
+
+{% block extra_head %}
+<style>
+/* ── Mode banner ─────────────────────────────────────────────────────── */
+.mode-banner {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 24px; margin-bottom: 24px;
+  border: 2px solid var(--border);
+  background: var(--bg1); position: relative; overflow: hidden;
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+.mode-banner.mode-simulate {
+  border-color: var(--amber);
+  box-shadow: 0 0 24px rgba(255,165,0,0.12);
+}
+.mode-banner.mode-live {
+  border-color: var(--green);
+  box-shadow: 0 0 24px rgba(0,255,65,0.12);
+}
+.mode-banner::before {
+  content: ''; position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+    45deg,
+    transparent 0, transparent 8px,
+    rgba(255,255,255,0.01) 8px, rgba(255,255,255,0.01) 16px
+  );
+  pointer-events: none;
+}
+.mode-left { display: flex; flex-direction: column; gap: 4px; }
+.mode-label {
+  font-size: 9px; letter-spacing: 0.3em; color: var(--text-lo);
+  font-family: var(--font-hud); text-transform: uppercase;
+}
+.mode-status {
+  font-family: var(--font-hud); font-size: 22px; font-weight: 700;
+  letter-spacing: 0.08em; transition: color 0.3s, text-shadow 0.3s;
+}
+.mode-status.simulate { color: var(--amber); text-shadow: 0 0 20px rgba(255,165,0,0.5); }
+.mode-status.live     { color: var(--green);  text-shadow: 0 0 20px rgba(0,255,65,0.5); }
+.mode-desc {
+  font-size: 11px; color: var(--text-dim); margin-top: 2px; max-width: 420px;
+}
+.mode-desc.simulate { color: var(--amber); opacity: 0.8; }
+.mode-desc.live     { color: var(--green-dim); opacity: 0.9; }
+
+/* The big mode switch */
+.mode-switch-wrap {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.mode-switch {
+  position: relative; width: 80px; height: 40px; cursor: pointer;
+}
+.mode-switch input { display: none; }
+.mode-track {
+  position: absolute; inset: 0;
+  background: rgba(255,165,0,0.15); border: 1px solid var(--amber);
+  transition: background 0.3s, border-color 0.3s;
+}
+.mode-switch input:checked ~ .mode-track {
+  background: rgba(0,255,65,0.12); border-color: var(--green);
+}
+.mode-thumb {
+  position: absolute; top: 4px; left: 4px;
+  width: 32px; height: 32px;
+  background: var(--amber);
+  box-shadow: 0 0 8px var(--amber);
+  transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1), background 0.3s, box-shadow 0.3s;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+}
+.mode-switch input:checked ~ .mode-thumb {
+  transform: translateX(40px);
+  background: var(--green);
+  box-shadow: 0 0 12px var(--green);
+}
+.mode-hint {
+  display: flex; gap: 20px; font-size: 9px;
+  font-family: var(--font-hud); letter-spacing: 0.1em;
+}
+.mode-hint span:first-child { color: var(--amber); }
+.mode-hint span:last-child  { color: var(--green); }
+
+/* ── Settings layout ─────────────────────────────────────────────────── */
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+
+@media (max-width: 900px) {
+  .settings-grid { grid-template-columns: 1fr; }
+  .mode-banner { flex-direction: column; gap: 20px; text-align: center; }
+  .mode-desc { max-width: 100%; }
+}
+.settings-section { margin-bottom: 28px; }
+.section-title {
+  font-family: var(--font-hud); font-size: 9px; letter-spacing: 0.3em;
+  color: var(--text-lo); text-transform: uppercase;
+  padding: 8px 0; border-bottom: 1px solid var(--border);
+  margin-bottom: 16px; display: flex; align-items: center; gap: 8px;
+}
+.section-title::before {
+  content: ''; width: 16px; height: 1px;
+  background: var(--green); box-shadow: 0 0 4px var(--green);
+}
+.protocol-toggle {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; background: var(--bg2);
+  border: 1px solid var(--border); margin-bottom: 8px;
+  transition: border-color 0.2s;
+}
+.protocol-toggle:hover { border-color: var(--border-hi); }
+.proto-name { font-family: var(--font-hud); font-size: 11px; letter-spacing: 0.08em; }
+.proto-addr { font-size: 9px; color: var(--text-lo); margin-top: 2px; }
+.save-banner {
+  position: fixed; bottom: 24px; right: 24px; z-index: 100;
+  background: var(--bg1); border: 1px solid var(--green);
+  padding: 14px 20px; display: flex; gap: 12px; align-items: center;
+  box-shadow: var(--glow); transform: translateY(100px);
+  transition: transform 0.3s ease;
+  font-family: var(--font-hud); font-size: 11px; color: var(--green);
+  letter-spacing: 0.1em;
+}
+.save-banner.show { transform: translateY(0); }
+.token-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 0; border-bottom: 1px solid rgba(42,74,46,0.3);
+}
+.token-row:last-child { border-bottom: none; }
+.token-sym { font-family: var(--font-hud); font-size: 10px; color: var(--cyan); width: 60px; flex-shrink: 0; }
+.range-input { -webkit-appearance: none; width: 100%; height: 3px; background: var(--border); outline: none; }
+.range-input::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; background: var(--green); cursor: pointer; box-shadow: 0 0 6px var(--green); }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- ── Mode toggle — full width, top of page ───────────────────────── -->
+<div class="mode-banner animate-in" id="mode-banner">
+  <div class="mode-left">
+    <div class="mode-label">Execution Mode</div>
+    <div class="mode-status simulate" id="mode-status-text">SIMULATE</div>
+    <div class="mode-desc simulate" id="mode-desc-text">
+      Paths are scanned and gaps calculated — arbitrage simulations run via eth_call only. No gas spent. No real transactions sent.
+    </div>
+  </div>
+
+  <div class="mode-switch-wrap">
+    <label class="mode-switch" title="Toggle simulate / live">
+      <input type="checkbox" id="mode-toggle" onchange="onModeToggle(this)">
+      <div class="mode-track"></div>
+      <div class="mode-thumb" id="mode-thumb">⬡</div>
+    </label>
+    <div class="mode-hint">
+      <span>SIMULATE</span>
+      <span>LIVE</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Save button row ─────────────────────────────────────────────── -->
+<div class="flex items-center justify-between mb-16 animate-in">
+  <div style="font-size:11px;color:var(--text-dim)">
+    Changes apply immediately. Private key is masked for display only.
+  </div>
+  <button class="btn btn-start" onclick="saveAll()">💾 SAVE CONFIG</button>
+</div>
+
+<!-- ── Two-column settings ──────────────────────────────────────────── -->
+<div class="settings-grid animate-in" id="settings-form">
+
+  <!-- LEFT -->
+  <div>
+    <div class="settings-section">
+      <div class="section-title">Network</div>
+      <div class="field">
+        <label class="field-label">RPC Endpoint (HTTP)</label>
+        <input type="text" id="cfg-rpc-http" placeholder="https://arb1.arbitrum.io/rpc">
+      </div>
+      <div class="field">
+        <label class="field-label">RPC WebSocket — optional (enables real-time events)</label>
+        <input type="text" id="cfg-rpc-ws" placeholder="wss://arb-mainnet.g.alchemy.com/v2/...">
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="section-title">Wallet</div>
+      <div class="field">
+        <label class="field-label">Private Key</label>
+        <input type="password" id="cfg-private-key" placeholder="0x…">
+        <div style="font-size:9px;color:var(--text-lo);margin-top:5px">Stored locally. Never transmitted. Masked in UI.</div>
+      </div>
+      <div class="field">
+        <label class="field-label">Arbitrage Contract Address</label>
+        <input type="text" id="cfg-contract" placeholder="Deploy FlashLoanArbitrage.sol first">
+      </div>
+    </div>
+
+
+    <div class="settings-section">
+      <div class="section-title">Notifications (optional)</div>
+      <div class="flex items-center" style="gap:12px;margin-bottom:14px">
+        <label class="toggle">
+          <input type="checkbox" id="cfg-notif-enabled">
+          <span class="toggle-slider"></span>
+        </label>
+        <span style="font-size:11px;color:var(--text-dim)">Enable Telegram alerts</span>
+      </div>
+      <div class="field">
+        <label class="field-label">Bot Token (from @BotFather)</label>
+        <input type="text" id="cfg-tg-token" placeholder="12345:AAF...">
+      </div>
+      <div class="field">
+        <label class="field-label">Chat ID</label>
+        <input type="text" id="cfg-tg-chat" placeholder="-100123456">
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT -->
+  <div>
+    <div class="settings-section">
+      <div class="section-title">Strategy</div>
+      <div class="field">
+        <label class="field-label">Min Profit USD — <span id="lbl-min-profit" style="color:var(--green)">$1</span></label>
+        <input type="range" class="range-input" id="cfg-min-profit" min="1" max="100" step="1"
+          oninput="document.getElementById('lbl-min-profit').textContent='$'+this.value">
+      </div>
+      <div class="field">
+        <label class="field-label">Max Gas USD — <span id="lbl-max-gas" style="color:var(--green)">$5</span></label>
+        <input type="range" class="range-input" id="cfg-max-gas" min="1" max="50" step="1"
+          oninput="document.getElementById('lbl-max-gas').textContent='$'+this.value">
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="section-title">Gas (Arbitrum)</div>
+      <div class="field">
+        <label class="field-label">Max Fee Per Gas (gwei) — <span id="lbl-gas" style="color:var(--green)">1.0</span></label>
+        <input type="range" class="range-input" id="cfg-gas-max" min="0.1" max="5.0" step="0.1"
+          oninput="document.getElementById('lbl-gas').textContent=parseFloat(this.value).toFixed(1)">
+      </div>
+      <div class="field">
+        <label class="field-label">Gas Limit</label>
+        <input type="number" id="cfg-gas-limit" min="500000" max="3000000" step="50000">
+      </div>
+      <div class="field">
+        <label class="field-label">Price Multiplier — <span id="lbl-gas-mult" style="color:var(--green)">1.2×</span></label>
+        <input type="range" class="range-input" id="cfg-gas-mult" min="1.0" max="2.0" step="0.05"
+          oninput="document.getElementById('lbl-gas-mult').textContent=parseFloat(this.value).toFixed(2)+'×'">
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="section-title">Scanning</div>
+      <div class="field">
+        <label class="field-label">Loop Interval (sec) — <span id="lbl-interval" style="color:var(--green)">20s</span></label>
+        <input type="range" class="range-input" id="cfg-interval" min="5" max="120" step="5"
+          oninput="document.getElementById('lbl-interval').textContent=this.value+'s'">
+      </div>
+      <div class="flex items-center" style="gap:12px;margin-bottom:14px">
+        <label class="toggle">
+          <input type="checkbox" id="cfg-oracle-watch">
+          <span class="toggle-slider"></span>
+        </label>
+        <span style="font-size:11px;color:var(--text-dim)">Watch Chainlink oracle feeds</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="save-banner" id="save-banner">
+  <span id="save-msg">✓ Configuration saved</span>
+  <button class="btn btn-sm" onclick="hideBanner()">DISMISS</button>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let _cfg = {};
+
+// ── Mode toggle ──────────────────────────────────────────────────────────────
+async function loadMode() {
+  try {
+    const r = await fetch('/api/mode');
+    const d = await r.json();
+    applyMode(d.mode);
+  } catch(e) {}
+}
+
+function applyMode(mode) {
+  const isLive    = mode === 'live';
+  const toggle    = document.getElementById('mode-toggle');
+  const banner    = document.getElementById('mode-banner');
+  const statusTxt = document.getElementById('mode-status-text');
+  const descTxt   = document.getElementById('mode-desc-text');
+  const thumb     = document.getElementById('mode-thumb');
+
+  toggle.checked = isLive;
+  banner.className    = 'mode-banner animate-in mode-' + mode;
+  statusTxt.className = 'mode-status ' + mode;
+  statusTxt.textContent = mode.toUpperCase();
+  descTxt.className   = 'mode-desc ' + mode;
+
+  if (isLive) {
+    descTxt.textContent = 'LIVE — real transactions are sent on-chain. Profits go to your contract.';
+    thumb.textContent = '🔴';
+  } else {
+    descTxt.textContent = 'SIMULATE — arbitrage simulations run via eth_call only. No gas. No real transactions.';
+    thumb.textContent = '⬡';
+  }
+}
+
+async function onModeToggle(el) {
+  const newMode = el.checked ? 'live' : 'simulate';
+  applyMode(newMode);  // instant UI feedback
+
+  try {
+    const r = await fetch('/api/mode', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: newMode})
+    });
+    const d = await r.json();
+    if (d.ok) {
+      showBanner(newMode === 'live'
+        ? '🔴 Mode set to LIVE — real transactions will be sent'
+        : '⬡ Mode set to SIMULATE — eth_call only, no gas spent'
+      );
+      // Bust config cache so bot picks up the change immediately
+      _cfg.mode = newMode;
+    } else {
+      showBanner('⚠️ ' + (d.msg || 'Mode switch failed'));
+      el.checked = !el.checked;  // revert
+      applyMode(el.checked ? 'live' : 'simulate');
+    }
+  } catch(e) {
+    showBanner('⚠️ Network error');
+  }
+}
+
+// ── Config form ──────────────────────────────────────────────────────────────
+async function loadSettings() {
+  const r = await fetch('/api/config');
+  _cfg = await r.json();
+  populateForm(_cfg);
+  applyMode(_cfg.mode || 'simulate');
+}
+
+function populateForm(c) {
+  const net = c.network    || {};
+  const wal = c.wallet     || {};
+  const str = c.strategy   || {};
+  const gas = c.gas        || {};
+  const scn = c.scanning   || {};
+  const not = c.notifications || {};
+
+  setVal('cfg-rpc-http',    net.rpc_http || '');
+  setVal('cfg-rpc-ws',      net.rpc_ws   || '');
+  setVal('cfg-private-key', wal.private_key || '');
+  setVal('cfg-contract',    wal.arb_contract || '');
+
+  setRange('cfg-min-profit', str.min_profit_usd || 1);
+  document.getElementById('lbl-min-profit').textContent = '$' + (str.min_profit_usd || 1);
+
+  setRange('cfg-max-gas', str.max_gas_usd || 5);
+  document.getElementById('lbl-max-gas').textContent = '$' + (str.max_gas_usd || 5);
+
+  setRange('cfg-gas-max',  gas.max_fee_per_gas_gwei || 1.0);
+  document.getElementById('lbl-gas').textContent = (gas.max_fee_per_gas_gwei || 1.0).toFixed(1);
+  setVal('cfg-gas-limit',  gas.gas_limit || 900000);
+  setRange('cfg-gas-mult', gas.gas_price_multiplier || 1.2);
+  document.getElementById('lbl-gas-mult').textContent = (gas.gas_price_multiplier || 1.2).toFixed(2) + '×';
+
+  setRange('cfg-interval', scn.main_loop_interval_seconds || 20);
+  document.getElementById('lbl-interval').textContent = (scn.main_loop_interval_seconds || 20) + 's';
+
+  document.getElementById('cfg-oracle-watch').checked = (c.oracle || {}).watch_chainlink !== false;
+  document.getElementById('cfg-notif-enabled').checked = not.enabled || false;
+  setVal('cfg-tg-token', not.telegram_bot_token || '');
+  setVal('cfg-tg-chat',  not.telegram_chat_id   || '');
+
+
+}
+
+async function saveAll() {
+  const updated = JSON.parse(JSON.stringify(_cfg));
+
+  updated.network = updated.network || {};
+  updated.network.rpc_http = document.getElementById('cfg-rpc-http').value;
+  updated.network.rpc_ws   = document.getElementById('cfg-rpc-ws').value;
+
+  updated.wallet = updated.wallet || {};
+  updated.wallet.private_key  = document.getElementById('cfg-private-key').value;
+  updated.wallet.arb_contract = document.getElementById('cfg-contract').value;
+
+  updated.strategy = updated.strategy || {};
+  updated.strategy.min_profit_usd     = parseFloat(document.getElementById('cfg-min-profit').value);
+  updated.strategy.max_gas_usd        = parseFloat(document.getElementById('cfg-max-gas').value);
+
+  updated.gas = updated.gas || {};
+  updated.gas.max_fee_per_gas_gwei   = parseFloat(document.getElementById('cfg-gas-max').value);
+  updated.gas.gas_limit              = parseInt(document.getElementById('cfg-gas-limit').value);
+  updated.gas.gas_price_multiplier   = parseFloat(document.getElementById('cfg-gas-mult').value);
+
+  updated.scanning = updated.scanning || {};
+  updated.scanning.main_loop_interval_seconds = parseInt(document.getElementById('cfg-interval').value);
+
+  updated.oracle = updated.oracle || {};
+  updated.oracle.watch_chainlink = document.getElementById('cfg-oracle-watch').checked;
+
+  updated.notifications = updated.notifications || {};
+  updated.notifications.enabled              = document.getElementById('cfg-notif-enabled').checked;
+  updated.notifications.telegram_bot_token   = document.getElementById('cfg-tg-token').value;
+  updated.notifications.telegram_chat_id     = document.getElementById('cfg-tg-chat').value;
+
+
+  const r = await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(updated)
+  });
+  const d = await r.json();
+  d.ok ? showBanner('✓ Configuration saved') : alert('Save failed: ' + d.msg);
+}
+
+function setVal(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
+function setRange(id, v) { const el = document.getElementById(id); if (el) el.value = v; }
+
+function showBanner(msg) {
+  if (msg) document.getElementById('save-msg').textContent = msg;
+  document.getElementById('save-banner').classList.add('show');
+  setTimeout(hideBanner, 3500);
+}
+function hideBanner() { document.getElementById('save-banner').classList.remove('show'); }
+
+loadSettings();
+</script>
+{% endblock %}

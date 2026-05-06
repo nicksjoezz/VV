@@ -1,0 +1,429 @@
+{% extends "base.html" %}
+{% block title %}Wallet{% endblock %}
+{% block page_title %}<span>WALLET</span> & HEALTH{% endblock %}
+
+{% block extra_head %}
+<style>
+/* ── Balance cards ─────────────────────────────────────────────────── */
+.wallet-addr {
+  font-family: var(--font-mono); font-size: 11px;
+  color: var(--cyan); letter-spacing: 0.04em;
+  background: var(--bg2); border: 1px solid var(--border);
+  padding: 8px 14px; display: inline-flex; align-items: center; gap: 10px;
+  margin-bottom: 20px;
+}
+.wallet-addr .copy-btn {
+  font-size: 10px; color: var(--text-lo); cursor: pointer;
+  background: none; border: none; font-family: var(--font-hud);
+  letter-spacing: 0.1em; transition: color 0.2s;
+}
+.wallet-addr .copy-btn:hover { color: var(--green); }
+
+.balance-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px; margin-bottom: 20px;
+}
+.balance-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  padding: 16px; position: relative; overflow: hidden;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.balance-card:hover { border-color: var(--border-hi); }
+.balance-card.has-funds { border-color: var(--green-dim); }
+.balance-card.has-funds::before {
+  content: ''; position: absolute; top:0; left:0; right:0;
+  height: 1px; background: linear-gradient(90deg, transparent, var(--green), transparent);
+}
+.bal-sym { font-family: var(--font-hud); font-size: 11px; color: var(--cyan); letter-spacing: 0.1em; }
+.bal-amount { font-family: var(--font-hud); font-size: 20px; color: var(--green); margin: 8px 0 4px; line-height: 1; }
+.bal-usd { font-size: 10px; color: var(--text-dim); }
+.bal-empty { opacity: 0.35; }
+.bal-empty .bal-amount { font-size: 16px; color: var(--text-lo); }
+
+.total-row {
+  background: var(--bg1); border: 1px solid var(--border-hi);
+  padding: 16px 20px; display: flex; align-items: center;
+  justify-content: space-between; margin-bottom: 20px;
+}
+.total-label { font-family: var(--font-hud); font-size: 10px; color: var(--text-dim); letter-spacing: 0.2em; }
+.total-value { font-family: var(--font-hud); font-size: 24px; color: var(--green); text-shadow: 0 0 20px #00ff4144; }
+
+/* ── Withdraw button ───────────────────────────────────────────────── */
+.withdraw-zone {
+  background: var(--bg1); border: 1px solid var(--border);
+  padding: 20px 24px; margin-bottom: 24px;
+}
+.withdraw-actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+
+/* ── Spinner ───────────────────────────────────────────────────────── */
+.spinner {
+  display: none; width: 16px; height: 16px;
+  border: 2px solid var(--border-hi); border-top-color: var(--green);
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Health check ──────────────────────────────────────────────────── */
+.health-panel {
+  background: var(--bg1); border: 1px solid var(--border); padding: 24px;
+}
+.health-run-row {
+  display: flex; align-items: center; gap: 16px; margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.health-results { display: none; }
+.health-results.show { display: block; }
+
+.check-item {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 10px 0; border-bottom: 1px solid rgba(42,74,46,0.25);
+  animation: fadeUp 0.25s ease both;
+}
+.check-item:last-child { border-bottom: none; }
+.check-icon {
+  font-size: 14px; width: 22px; flex-shrink: 0; margin-top: 1px;
+}
+.check-name {
+  font-family: var(--font-hud); font-size: 10px; letter-spacing: 0.1em;
+  color: var(--text-dim); min-width: 150px; flex-shrink: 0;
+}
+
+@media (max-width: 600px) {
+  .check-item { flex-direction: column; gap: 4px; }
+  .check-name { min-width: unset; }
+  .total-row { flex-direction: column; gap: 10px; text-align: center; }
+}
+.check-detail { font-size: 11px; color: var(--text-lo); flex: 1; }
+.check-item.ok     .check-icon { color: var(--green); }
+.check-item.ok     .check-name { color: var(--text); }
+.check-item.warn   .check-icon { color: var(--amber); }
+.check-item.warn   .check-name { color: var(--amber); }
+.check-item.fail   .check-icon { color: var(--red); }
+.check-item.fail   .check-name { color: var(--red); }
+.check-item.loading .check-icon { color: var(--text-lo); }
+
+.health-summary {
+  display: none; margin-top: 16px;
+  padding: 12px 16px; font-family: var(--font-hud);
+  font-size: 11px; letter-spacing: 0.1em;
+  border: 1px solid; text-align: center;
+}
+.health-summary.ok   { border-color: var(--green); color: var(--green); background: #00ff4108; }
+.health-summary.warn { border-color: var(--amber); color: var(--amber); background: #ffa50008; }
+.health-summary.fail { border-color: var(--red);   color: var(--red);   background: #ff224408; }
+
+/* ── Tx result ─────────────────────────────────────────────────────── */
+.tx-result {
+  margin-top: 16px; padding: 12px 16px;
+  border: 1px solid var(--border); background: var(--bg2);
+  font-size: 11px; display: none;
+}
+.tx-result.show { display: block; }
+.tx-ok  { color: var(--green); }
+.tx-err { color: var(--red); }
+.tx-row { display: flex; justify-content: space-between; padding: 4px 0; }
+.tx-hash { font-family: var(--font-mono); font-size: 10px; color: var(--cyan); }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<!-- ── Wallet address bar ─────────────────────────────────────────── -->
+<div class="wallet-addr animate-in">
+  <span id="wallet-address">Loading…</span>
+  <button class="copy-btn" onclick="copyAddr()">⎘ COPY</button>
+</div>
+
+<!-- ── ETH gas balance ───────────────────────────────────────────── -->
+<div class="grid-2 animate-in" style="margin-bottom:20px">
+  <div class="stat-block">
+    <div class="stat-label">Wallet ETH (gas)</div>
+    <div class="stat-value" id="eth-balance" style="font-size:22px">—</div>
+    <div class="stat-sub" id="eth-usd">—</div>
+  </div>
+  <div class="stat-block">
+    <div class="stat-label">Contract Stranded Balance</div>
+    <div class="stat-value" id="total-profit-bal" style="font-size:22px">—</div>
+    <div class="stat-sub">Should be $0 — profits go directly to your wallet</div>
+  </div>
+</div>
+
+<!-- ── Token balances grid ───────────────────────────────────────── -->
+<div class="card animate-in" style="margin-bottom:20px">
+  <div class="card-header">
+    <div class="card-title"><span class="dot"></span> Contract Token Balances</div>
+    <button class="btn btn-sm" onclick="loadBalances()">↻ REFRESH</button>
+  </div>
+  <div class="card-body">
+    <div class="balance-grid" id="balance-grid">
+      <div style="color:var(--text-lo);font-size:11px;padding:8px">Loading balances…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Withdraw zone ─────────────────────────────────────────────── -->
+<div class="withdraw-zone card animate-in" style="margin-bottom:24px">
+  <div class="card-header" style="padding:0 0 14px">
+    <div class="card-title"><span class="dot"></span> Withdraw Profits to Wallet</div>
+  </div>
+
+  <div style="font-size:11px;color:var(--text-dim);margin-bottom:16px">
+    Emergency recovery only — profits are sent directly to your wallet on each execution.
+    Use this to retrieve tokens <em>stranded</em> in the contract if a mid-path swap reverted.
+    Only available in <span style="color:var(--green);font-family:var(--font-hud)">LIVE</span> mode.
+  </div>
+
+  <div class="withdraw-actions">
+    <button class="btn btn-start" id="btn-withdraw-all" onclick="withdrawAll()">
+      <div class="spinner" id="spinner-all"></div>
+      ⬆ WITHDRAW ALL
+    </button>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select id="withdraw-token-select" style="background:var(--bg2);border:1px solid var(--border);color:var(--text);font-family:var(--font-hud);font-size:10px;padding:8px 12px;letter-spacing:0.1em">
+        <option value="">Select token…</option>
+      </select>
+      <button class="btn" id="btn-withdraw-one" onclick="withdrawOne()">
+        <div class="spinner" id="spinner-one"></div>
+        ⬆ WITHDRAW
+      </button>
+    </div>
+  </div>
+
+  <div class="tx-result" id="tx-result"></div>
+</div>
+
+<!-- ── Health check ──────────────────────────────────────────────── -->
+<div class="health-panel card animate-in">
+  <div class="card-header" style="padding:0 0 16px">
+    <div class="card-title"><span class="dot"></span> Pre-flight Health Check</div>
+  </div>
+
+  <div style="font-size:11px;color:var(--text-dim);margin-bottom:16px">
+    Validates RPC connection, wallet balance, contract deployment, protocol pools, oracle feeds, and swap routing before going live.
+  </div>
+
+  <div class="health-run-row">
+    <button class="btn btn-start" id="btn-health" onclick="runHealthCheck()">
+      <div class="spinner" id="spinner-health"></div>
+      ◈ RUN HEALTH CHECK
+    </button>
+    <span id="health-status-text" style="font-size:10px;color:var(--text-lo);font-family:var(--font-hud);letter-spacing:0.1em"></span>
+  </div>
+
+  <div class="health-results" id="health-results">
+    <div id="check-list"></div>
+    <div class="health-summary" id="health-summary"></div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+let _walletAddr = '';
+let _balances   = {};
+
+// ── Load balances ─────────────────────────────────────────────────────────────
+async function loadBalances() {
+  const r = await fetch('/api/wallet/balances');
+  const d = await r.json();
+
+  if (d.error) {
+    document.getElementById('balance-grid').innerHTML =
+      `<div style="color:var(--red);font-size:11px">${d.error}</div>`;
+    return;
+  }
+
+  _walletAddr = d.wallet || '';
+  _balances   = d.balances || {};
+
+  document.getElementById('wallet-address').textContent = _walletAddr;
+  document.getElementById('eth-balance').textContent    = (d.eth || 0).toFixed(5) + ' ETH';
+  document.getElementById('eth-usd').textContent        = '≈ $' + (d.eth_usd || 0).toFixed(2);
+  document.getElementById('total-profit-bal').textContent = '$' + (d.total_usd || 0).toFixed(2);
+
+  // Build balance cards
+  const allTokens = await getAllTokenSymbols();
+  const grid = document.getElementById('balance-grid');
+  grid.innerHTML = '';
+
+  // Tokens with balance first, then zero-balance tokens
+  const withFunds = Object.entries(_balances);
+  const empty     = allTokens.filter(s => !_balances[s]);
+
+  const selectEl = document.getElementById('withdraw-token-select');
+  selectEl.innerHTML = '<option value="">All tokens…</option>';
+
+  withFunds.forEach(([sym, info]) => {
+    grid.innerHTML += balanceCard(sym, info.amount, info.usd, true);
+    selectEl.innerHTML += `<option value="${sym}">${sym} (${info.amount.toFixed(4)})</option>`;
+  });
+
+  empty.slice(0, 12).forEach(sym => {
+    grid.innerHTML += balanceCard(sym, 0, 0, false);
+  });
+}
+
+async function getAllTokenSymbols() {
+  try {
+    const r = await fetch('/api/config');
+    const c = await r.json();
+    return Object.keys(c.tokens || {});
+  } catch { return []; }
+}
+
+function balanceCard(sym, amount, usd, hasFunds) {
+  const cls = hasFunds ? 'has-funds' : 'bal-empty';
+  const amtStr = hasFunds ? amount.toFixed(amount < 0.001 ? 8 : 4) : '0';
+  const usdStr = hasFunds && usd ? `$${usd.toFixed(2)}` : '';
+  return `<div class="balance-card ${cls}">
+    <div class="bal-sym">${sym}</div>
+    <div class="bal-amount">${amtStr}</div>
+    ${usdStr ? `<div class="bal-usd">${usdStr}</div>` : ''}
+  </div>`;
+}
+
+function copyAddr() {
+  if (!_walletAddr) return;
+  navigator.clipboard.writeText(_walletAddr).then(() => {
+    const btn = document.querySelector('.copy-btn');
+    btn.textContent = '✓ COPIED';
+    setTimeout(() => btn.textContent = '⎘ COPY', 1500);
+  });
+}
+
+// ── Withdraw ──────────────────────────────────────────────────────────────────
+async function withdraw(token) {
+  const spinnerId = token ? 'spinner-one' : 'spinner-all';
+  const btnId     = token ? 'btn-withdraw-one' : 'btn-withdraw-all';
+  const spinner   = document.getElementById(spinnerId);
+  const btn       = document.getElementById(btnId);
+
+  spinner.style.display = 'block';
+  btn.disabled = true;
+
+  const result  = document.getElementById('tx-result');
+  result.classList.remove('show');
+
+  try {
+    const payload = token ? { token } : {};
+    const r = await fetch('/api/wallet/withdraw', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+
+    result.classList.add('show');
+
+    if (!d.ok) {
+      result.innerHTML = `<div class="tx-err">❌ ${d.msg}</div>`;
+    } else {
+      const rows = (d.results || []).map(r => {
+        if (r.status === 'success') {
+          return `<div class="tx-row">
+            <span class="tx-ok">✅ ${r.token} — ${r.amount} withdrawn</span>
+            <span class="tx-hash">${r.tx_hash.slice(0,18)}…</span>
+          </div>`;
+        } else if (r.status === 'skipped') {
+          return `<div class="tx-row"><span style="color:var(--text-lo)">— ${r.token}: ${r.msg}</span></div>`;
+        } else {
+          return `<div class="tx-row"><span class="tx-err">❌ ${r.token}: ${r.msg||r.status}</span></div>`;
+        }
+      }).join('');
+      result.innerHTML = rows || '<div class="tx-ok">Nothing to withdraw — balances are zero.</div>';
+
+      // Reload balances after withdraw
+      setTimeout(loadBalances, 2000);
+    }
+  } catch(e) {
+    document.getElementById('tx-result').classList.add('show');
+    document.getElementById('tx-result').innerHTML = `<div class="tx-err">❌ ${e.message}</div>`;
+  } finally {
+    spinner.style.display = 'none';
+    btn.disabled = false;
+  }
+}
+
+function withdrawAll() { withdraw(null); }
+function withdrawOne() {
+  const sym = document.getElementById('withdraw-token-select').value;
+  if (sym) withdraw(sym);
+}
+
+// ── Health check ──────────────────────────────────────────────────────────────
+const CHECK_ICONS = { ok: '✅', warn: '⚠️', fail: '❌', loading: '◌' };
+
+async function runHealthCheck() {
+  const btn        = document.getElementById('btn-health');
+  const spinner    = document.getElementById('spinner-health');
+  const results    = document.getElementById('health-results');
+  const checkList  = document.getElementById('check-list');
+  const summary    = document.getElementById('health-summary');
+  const statusText = document.getElementById('health-status-text');
+
+  btn.disabled = true;
+  spinner.style.display = 'block';
+  results.classList.add('show');
+  summary.style.display  = 'none';
+  statusText.textContent = 'Running checks…';
+
+  // Show placeholder loading items
+  checkList.innerHTML = [
+    'Config', 'RPC Connection', 'Wallet Balance', 'Arbitrage Contract',
+    'Protocols', 'Balancer Vault', 'Oracle Feeds', 'Uniswap Quoter'
+  ].map(name => checkRow({status:'loading', name, detail:'checking…'})).join('');
+
+  try {
+    const r = await fetch('/api/health-check');
+    const d = await r.json();
+
+    // Animate each check result in with a delay
+    checkList.innerHTML = '';
+    d.checks.forEach((chk, i) => {
+      setTimeout(() => {
+        checkList.innerHTML += checkRow(chk);
+      }, i * 80);
+    });
+
+    setTimeout(() => {
+      summary.style.display = 'block';
+      summary.className     = 'health-summary ' + d.summary;
+      if (d.summary === 'ok') {
+        summary.textContent = '✅  All checks passed — bot is ready to run';
+        statusText.textContent = 'ALL CLEAR';
+        statusText.style.color = 'var(--green)';
+      } else if (d.summary === 'warn') {
+        summary.textContent = `⚠️  ${d.warned} warning(s) — review above before going live`;
+        statusText.textContent = 'WARNINGS';
+        statusText.style.color = 'var(--amber)';
+      } else {
+        summary.textContent = `❌  ${d.failed} check(s) failed — fix before running bot`;
+        statusText.textContent = 'FAILED';
+        statusText.style.color = 'var(--red)';
+      }
+    }, d.checks.length * 80 + 100);
+
+  } catch(e) {
+    checkList.innerHTML = checkRow({status:'fail', name:'Health Check', detail: e.message});
+    statusText.textContent = 'ERROR';
+  } finally {
+    spinner.style.display = 'none';
+    btn.disabled = false;
+  }
+}
+
+function checkRow(chk) {
+  const icon   = CHECK_ICONS[chk.status] || '◌';
+  const delay  = '';
+  return `<div class="check-item ${chk.status}">
+    <span class="check-icon">${icon}</span>
+    <span class="check-name">${chk.name}</span>
+    <span class="check-detail">${chk.detail || ''}</span>
+  </div>`;
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+loadBalances();
+</script>
+{% endblock %}

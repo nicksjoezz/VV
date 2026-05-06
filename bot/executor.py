@@ -1,0 +1,292 @@
+import time
+from .utils import get_web3, get_account, cfg, checksum, logger
+from .database import record_execution
+from .arb_math import calculate_optimal_multihop
+
+ARB_CONTRACT_ABI = [
+    {
+        "name": "executeArb", "type": "function", "stateMutability": "nonpayable",
+        "inputs": [
+            {"name": "amountFlash", "type": "uint256"},
+            {"name": "tokenFlash",  "type": "address"},
+            {"components": [
+                {"name": "dex",      "type": "uint8"},
+                {"name": "tokenIn",  "type": "address"},
+                {"name": "tokenOut", "type": "address"},
+                {"name": "fee",      "type": "uint24"}
+            ], "name": "steps", "type": "tuple[]"},
+            {"name": "minProfit", "type": "uint256"}
+        ],
+        "outputs": []
+    },
+    {
+        "name": "withdraw", "type": "function", "stateMutability": "nonpayable",
+        "inputs":  [{"name": "token", "type": "address"}],
+        "outputs": []
+    },
+    {
+        "name": "owner", "type": "function", "stateMutability": "view",
+        "inputs":  [],
+        "outputs": [{"type": "address"}]
+    }
+]
+
+DEX_TYPE_MAP = {
+    "univ2":     0,
+    "univ3":     1,
+    "camelotv2": 2,
+    "camelotv3": 3,
+    "algebra":   3,
+    "sushiv2":   4,
+}
+
+# WETH/USDC.e UniV3 0.05% pool on Arbitrum — used to price ETH in USD.
+# token0=WETH(18 dec), token1=USDC.e(6 dec) → price = (sqrtP/2^96)^2 * 10^12
+_WETH_USDC_POOL = "0xC6962004f452fE5bE02D0E47321ee3deFb746355"
+_SEL_SLOT0      = "0x3850c7bd"
+
+
+def get_mode() -> str:
+    try:
+        import bot.utils as _u
+        raw = (_u.load_config() or {}).get("mode", "simulate")
+        return raw if raw in ("simulate", "live") else "simulate"
+    except Exception:
+        return "simulate"
+
+
+class ArbExecutor:
+    def __init__(self):
+        self._w3      = get_web3()
+        self._account = get_account()
+        contract_addr = cfg("wallet", "arb_contract")
+
+        if not contract_addr or contract_addr == "DEPLOY_CONTRACT_ADDRESS_HERE":
+            self._contract = None
+            logger.warning("arb_contract not set — execution disabled")
+        else:
+            self._contract = self._w3.eth.contract(
+                address=checksum(contract_addr),
+                abi=ARB_CONTRACT_ABI
+            )
+
+        # ETH/USD price cache — refreshed every 5 minutes
+        self._eth_price: float      = 3000.0
+        self._eth_price_ts: float   = 0.0
+
+        logger.info(
+            f"ArbExecutor ready | Contract: "
+            f"{contract_addr[:10] if self._contract else 'None'}"
+        )
+
+    # ── ETH price ─────────────────────────────────────────────────────────────
+
+    def _get_eth_price_usd(self) -> float:
+        """
+        Returns ETH/USD price fetched from the on-chain WETH/USDC.e UniV3 pool.
+        Result is cached for 5 minutes to avoid extra RPC calls on every opportunity.
+        """
+        if time.time() - self._eth_price_ts < 300:
+            return self._eth_price
+
+        try:
+            raw = self._w3.eth.call({
+                "to":   checksum(_WETH_USDC_POOL),
+                "data": _SEL_SLOT0,
+            })
+            # token0=WETH(18), token1=USDC.e(6)
+            # price_weth_in_usdc = (sqrtP/2^96)^2 * 10^(18-6) = (sqrtP/2^96)^2 * 10^12
+            sqrt_p = self._w3.codec.decode(["uint160"], raw[:32])[0]
+            price  = (sqrt_p / (2 ** 96)) ** 2 * (10 ** 12)
+            if price > 100:                          # sanity check
+                self._eth_price    = price
+                self._eth_price_ts = time.time()
+                logger.debug(f"ETH price refreshed: ${price:,.0f}")
+        except Exception as e:
+            logger.warning(f"ETH price fetch failed, using cached ${self._eth_price:,.0f}: {e}")
+
+        return self._eth_price
+
+    # ── Gas & profit checks ───────────────────────────────────────────────────
+
+    def _to_usd(self, amount_tokens: float, dec_in: int) -> float:
+        """Convert a token amount to approximate USD value."""
+        if dec_in == 6:          # USDC / USDC.e — already USD-pegged
+            return amount_tokens
+        return amount_tokens * self._get_eth_price_usd()
+
+    def _check_viable(
+        self,
+        opportunity: dict,
+        amount_flash: int,
+        dec_in: int,
+    ) -> tuple:
+        """
+        Pre-flight checks before building or sending any transaction.
+
+        Returns (ok: bool, profit_usd: float, gas_cost_usd: float).
+        Logs the reason and returns False when any check fails.
+        """
+        gap            = opportunity.get("gap", 0)
+        profit_tokens  = gap * (amount_flash / 10 ** dec_in)
+        profit_usd     = self._to_usd(profit_tokens, dec_in)
+
+        # 1. Minimum profit threshold (from config)
+        min_profit_usd = cfg("strategy", "min_profit_usd")
+        if profit_usd < min_profit_usd:
+            logger.debug(
+                f"Skip {opportunity['symbol']}: "
+                f"profit ${profit_usd:.2f} < min ${min_profit_usd:.2f}"
+            )
+            return False, profit_usd, 0.0
+
+        # 2. Gas cost in USD using current on-chain gas price
+        try:
+            gas_price_wei = self._w3.eth.gas_price          # current base + priority
+        except Exception:
+            gas_price_wei = self._w3.to_wei(
+                cfg("gas", "max_fee_per_gas_gwei"), "gwei"
+            )
+
+        gas_limit    = cfg("gas", "gas_limit")
+        gas_cost_eth = (gas_price_wei * gas_limit) / 10 ** 18
+        gas_cost_usd = gas_cost_eth * self._get_eth_price_usd()
+
+        # 3. Hard cap on gas spend (config: strategy.max_gas_usd)
+        max_gas_usd = cfg("strategy", "max_gas_usd")
+        if gas_cost_usd > max_gas_usd:
+            logger.warning(
+                f"Skip {opportunity['symbol']}: "
+                f"gas ${gas_cost_usd:.4f} > max_gas_usd ${max_gas_usd:.2f}"
+            )
+            return False, profit_usd, gas_cost_usd
+
+        # 4. Gas must be less than expected profit (net positive trade)
+        if gas_cost_usd >= profit_usd:
+            logger.info(
+                f"Skip {opportunity['symbol']}: "
+                f"gas ${gas_cost_usd:.4f} >= profit ${profit_usd:.4f}"
+            )
+            return False, profit_usd, gas_cost_usd
+
+        return True, profit_usd, gas_cost_usd
+
+    # ── Flash amount sizing ───────────────────────────────────────────────────
+
+    def _get_flash_amount(self, opportunity: dict) -> tuple:
+        """
+        Size the flash loan using calculate_optimal_multihop exclusively.
+        Back-propagates the 3% impact cap through every pool in the path.
+        Returns (0, dec_in) when reserve data is missing — caller must skip.
+        """
+        gap    = opportunity.get("gap", 0)
+        dec_in = opportunity.get("dec_in", 18)
+        hops   = opportunity.get("hops", [])
+
+        amount = calculate_optimal_multihop(hops, gap)
+        if amount > 0:
+            logger.debug(
+                f"Flash size: {amount / 10**dec_in:.6f} "
+                f"across {len(hops)} pools (gap={gap:.3%})"
+            )
+        return amount, dec_in
+
+    # ── Transaction builder ───────────────────────────────────────────────────
+
+    def _build_tx(self, opportunity: dict, amount_flash: int, min_profit: int) -> dict:
+        steps = [
+            {
+                "dex":      DEX_TYPE_MAP.get(opportunity["versions"][i], 1),
+                "tokenIn":  checksum(opportunity["tokens"][i]),
+                "tokenOut": checksum(opportunity["tokens"][i + 1]),
+                "fee":      opportunity["fees"][i] or 0,
+            }
+            for i in range(len(opportunity["pools"]))
+        ]
+
+        nonce = self._w3.eth.get_transaction_count(self._account.address, "pending")
+
+        return self._contract.functions.executeArb(
+            amount_flash,
+            checksum(opportunity["tokens"][0]),
+            steps,
+            min_profit,
+        ).build_transaction({
+            "from":                 self._account.address,
+            "nonce":                nonce,
+            "chainId":              cfg("network", "chain_id"),
+            "gas":                  cfg("gas", "gas_limit"),
+            "maxFeePerGas":         self._w3.to_wei(cfg("gas", "max_fee_per_gas_gwei"),    "gwei"),
+            "maxPriorityFeePerGas": self._w3.to_wei(cfg("gas", "max_priority_fee_gwei"),   "gwei"),
+        })
+
+    # ── Main entry point ──────────────────────────────────────────────────────
+
+    async def execute(self, opportunity: dict):
+        mode = get_mode()
+
+        if not self._contract or not self._account:
+            logger.warning(
+                f"[{mode.upper()}] Cannot execute {opportunity['symbol']}: "
+                "arb_contract or private_key not configured."
+            )
+            return None
+
+        amount_flash, dec_in = self._get_flash_amount(opportunity)
+
+        if amount_flash == 0:
+            logger.debug(f"Skip {opportunity['symbol']}: no reserve data for sizing")
+            return None
+
+        # ── Pre-flight: profit & gas checks ───────────────────────────────────
+        ok, profit_usd, gas_cost_usd = self._check_viable(opportunity, amount_flash, dec_in)
+        if not ok:
+            return None
+
+        # On-chain minimum profit (0.1% of flash amount, in token native units)
+        min_profit = max(1, int(amount_flash * 0.001))
+
+        try:
+            tx = self._build_tx(opportunity, amount_flash, min_profit)
+
+            record_payload = {
+                "token":            opportunity["tokens"][0],
+                "symbol":           opportunity["symbol"],
+                "type":             opportunity.get("type", "dual"),
+                "gap":              opportunity["gap"],
+                "amount_flash":     amount_flash / 10 ** dec_in,
+                "estimated_profit": profit_usd,
+                "gas_cost_usd":     gas_cost_usd,
+                "timestamp":        int(time.time()),
+            }
+
+            if mode == "simulate":
+                self._w3.eth.call(tx)
+                logger.info(
+                    f"[SIMULATE] [OK] {opportunity['symbol']} | "
+                    f"Gap={opportunity['gap']:.3%} | "
+                    f"Flash={amount_flash / 10**dec_in:.4f} | "
+                    f"Profit≈${profit_usd:.2f} | "
+                    f"Gas≈${gas_cost_usd:.4f}"
+                )
+                record_payload["tx_hash"] = f"sim-{int(time.time())}-{opportunity['symbol']}"
+                record_execution(record_payload)
+                return "sim-success"
+
+            else:
+                signed  = self._account.sign_transaction(tx)
+                tx_hash = self._w3.eth.send_raw_transaction(signed.raw_transaction)
+                logger.info(
+                    f"[LIVE] Sent: {tx_hash.hex()} | {opportunity['symbol']} | "
+                    f"Flash={amount_flash / 10**dec_in:.4f} | "
+                    f"Profit≈${profit_usd:.2f} | Gas≈${gas_cost_usd:.4f}"
+                )
+                record_payload["tx_hash"] = tx_hash.hex()
+                record_execution(record_payload)
+                return tx_hash.hex()
+
+        except Exception as e:
+            logger.info(
+                f"[{mode.upper()}] [FAILED] {opportunity['symbol']}: {str(e)[:120]}"
+            )
+            return None

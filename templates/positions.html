@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Watchlist{% endblock %}
+{% block page_title %}<span>ARBITRAGE</span> PATHS{% endblock %}
+
+{% block extra_head %}
+<style>
+.path-tag {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  font-weight: bold;
+  margin-right: 6px;
+}
+.tag-dual { background: rgba(0, 255, 255, 0.1); color: var(--cyan); border: 1px solid var(--cyan); }
+.tag-tri { background: rgba(255, 200, 0, 0.1); color: var(--amber); border: 1px solid var(--amber); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="card animate-in">
+  <div class="card-header">
+    <div class="card-title"><span class="dot"></span> Active Watchlist</div>
+    <span id="pos-count" style="font-size:10px;color:var(--text-dim)">0 paths</span>
+  </div>
+  <div class="card-body" style="padding:0">
+    <div class="table-responsive">
+      <table class="data-table" id="positions-table">
+      <thead>
+        <tr>
+          <th>TYPE</th>
+          <th>SYMBOL / PATH</th>
+          <th>DEXES</th>
+          <th>POOLS</th>
+        </tr>
+      </thead>
+      <tbody id="positions-body">
+        <tr><td colspan="4" class="dim" style="text-align:center;padding:32px">
+          Loading paths…
+        </td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function onPositions(paths) {
+  const tbody = document.getElementById('positions-body');
+  setEl('pos-count', paths.length + ' paths');
+
+  if (!paths.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="dim" style="text-align:center;padding:32px">No paths in watchlist</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = paths.map(p => {
+    const typeClass = p.type === 'dual' ? 'tag-dual' : 'tag-tri';
+    const typeLabel = p.type === 'dual' ? 'DUAL' : 'TRI';
+    const dexes = p.dexes.join(' → ');
+    const pools = p.pools.map(addr => fmtAddr(addr)).join(' | ');
+
+    return `<tr>
+      <td><span class="path-tag ${typeClass}">${typeLabel}</span></td>
+      <td class="cyan">${p.symbol}</td>
+      <td class="dim" style="font-size:10px">${dexes}</td>
+      <td class="mono dim" style="font-size:10px">${pools}</td>
+    </tr>`;
+  }).join('');
+}
+</script>
+{% endblock %}

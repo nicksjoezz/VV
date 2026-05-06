@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}Terminal{% endblock %}
+{% block page_title %}<span>BOT</span> TERMINAL{% endblock %}
+
+{% block extra_head %}
+<style>
+#terminal {
+  background: #010801;
+  border: 1px solid var(--border);
+  height: calc(100vh - 180px);
+  overflow-y: auto;
+  padding: 16px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  position: relative;
+}
+#terminal::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 23.5px, rgba(0,255,65,0.02) 23.5px, rgba(0,255,65,0.02) 24px);
+  pointer-events: none;
+}
+.log-line { display: block; word-break: break-all; }
+.log-line.info    { color: #7abf82; }
+.log-line.warning { color: var(--amber); }
+.log-line.error   { color: var(--red); }
+.log-line.success { color: var(--green); text-shadow: 0 0 8px var(--green); }
+.log-line.debug   { color: var(--text-lo); }
+.log-timestamp { color: var(--text-lo); margin-right: 8px; }
+.log-level    { margin-right: 8px; font-weight: 500; }
+.log-cursor {
+  display: inline-block; width: 8px; height: 14px;
+  background: var(--green); vertical-align: text-bottom;
+  animation: blink 1s step-end infinite;
+}
+@keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+
+.terminal-toolbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; background: var(--bg1);
+  border: 1px solid var(--border); border-bottom: none;
+}
+.toolbar-dot { width:10px; height:10px; border-radius:50%; }
+
+.bot-controls {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 16px; padding: 14px 16px;
+  background: var(--bg1); border: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.pid-display {
+  font-family: var(--font-hud); font-size: 10px;
+  color: var(--text-dim); letter-spacing: 0.1em;
+  margin-left: auto;
+}
+#bot-uptime { color: var(--green); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="bot-controls animate-in">
+  <button class="btn btn-start" onclick="startBot()" id="btn-start">▶ START BOT</button>
+  <button class="btn btn-stop"  onclick="stopBot()"  id="btn-stop">⬛ STOP BOT</button>
+  <button class="btn" onclick="clearTerm()" style="margin-left:8px">✕ CLEAR</button>
+  <button class="btn" onclick="toggleAutoscroll()" id="btn-scroll">⬇ AUTOSCROLL ON</button>
+  <div class="pid-display">UPTIME: <span id="bot-uptime">—</span></div>
+</div>
+
+<div class="terminal-toolbar">
+  <div class="toolbar-dot" style="background:#ff5f57"></div>
+  <div class="toolbar-dot" style="background:#febc2e"></div>
+  <div class="toolbar-dot" style="background:#28c840"></div>
+  <span style="font-size:10px;color:var(--text-dim);margin-left:8px;font-family:var(--font-hud);letter-spacing:0.1em">
+    LIQBOT — ARBITRUM MAINNET — LIVE OUTPUT
+  </span>
+  <span id="log-count" style="margin-left:auto;font-size:9px;color:var(--text-lo);font-family:var(--font-hud)">0 LINES</span>
+</div>
+
+<div id="terminal">
+  <span class="log-line info">
+    <span class="log-timestamp">──────────────────────</span>
+    <span style="color:var(--green)">LIQBOT TERMINAL READY</span>
+  </span>
+  <span class="log-line info">
+    <span class="log-timestamp">──────────────────────</span>
+    <span style="color:var(--text-dim)">Waiting for bot process...</span>
+  </span>
+  <span class="log-cursor"></span>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let autoScroll   = true;
+let lineCount    = 0;
+let botStartTime = null;
+
+function toggleAutoscroll() {
+  autoScroll = !autoScroll;
+  setEl('btn-scroll', autoScroll ? '⬇ AUTOSCROLL ON' : '⬇ AUTOSCROLL OFF');
+}
+
+function clearTerm() {
+  const t = document.getElementById('terminal');
+  t.innerHTML = '<span class="log-cursor"></span>';
+  lineCount = 0;
+  setEl('log-count', '0 LINES');
+}
+
+function classifyLine(line) {
+  if (line.includes('✅') || line.includes('SUCCESS')) return 'success';
+  if (line.includes('WARNING') || line.includes('⚠️') || line.includes('⚡')) return 'warning';
+  if (line.includes('ERROR') || line.includes('❌') || line.includes('CRITICAL')) return 'error';
+  if (line.includes('DEBUG')) return 'debug';
+  return 'info';
+}
+
+function parseLogLine(raw) {
+  // Format: "2026-03-23 12:34:56 [INFO] module: message"
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] (.+)/);
+  if (!m) return { ts: '', level: '', msg: raw };
+  return { ts: m[1].slice(11), level: m[2], msg: m[3] };
+}
+
+function addLine(rawLine) {
+  if (!rawLine) return;
+  const term   = document.getElementById('terminal');
+  const cursor = term.querySelector('.log-cursor');
+
+  const { ts, level, msg } = parseLogLine(rawLine.trim());
+  const cls = classifyLine(rawLine);
+
+  const span = document.createElement('span');
+  span.className = "log-line " + cls;
+
+  if (ts) {
+    span.innerHTML = '<span class="log-timestamp">' + ts + '</span><span class="log-level">[' + level + ']</span>' + escHtml(msg);
+  } else {
+    span.textContent = rawLine.trim();
+  }
+
+  if (cursor) term.insertBefore(span, cursor);
+  else term.appendChild(span);
+
+  lineCount++;
+  // Keep max 2000 lines
+  const lines = term.querySelectorAll('.log-line');
+  if (lines.length > 2000) lines[0].remove();
+
+  setEl('log-count', lineCount.toLocaleString() + ' LINES');
+
+  if (autoScroll) term.scrollTop = term.scrollHeight;
+}
+
+function escHtml(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function onLogLine(line) {
+  addLine(line);
+}
+
+// Global socket listener
+socket.on('log_line', function(data) {
+    if (data && data.line) {
+        addLine(data.line);
+    }
+});
+
+async function startBot() {
+  const r = await fetch('/api/bot/start', { method:'POST' });
+  const d = await r.json();
+  if (d.ok) {
+    addLine("[INFO] Bot started (PID " + d.pid + ")");
+    botStartTime = Date.now();
+  } else {
+    addLine("[ERROR] " + d.msg);
+  }
+}
+
+async function stopBot() {
+  const r = await fetch('/api/bot/stop', { method:'POST' });
+  const d = await r.json();
+  addLine(d.ok ? '[INFO] Bot stopped.' : "[ERROR] " + d.msg);
+  botStartTime = null;
+}
+
+// Load last 150 lines on startup
+(async () => {
+  try {
+    const r = await fetch('/api/logs?lines=150');
+    const d = await r.json();
+    if (d.logs) d.logs.forEach(l => addLine(l));
+  } catch(e) {}
+})();
+
+// Uptime counter
+setInterval(() => {
+  if (!botStartTime) return;
+  const s = Math.floor((Date.now() - botStartTime) / 1000);
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60;
+  setEl('bot-uptime', String(h).padStart(2,'0') + ":" + String(m).padStart(2,'0') + ":" + String(ss).padStart(2,'0'));
+}, 1000);
+
+socket.on('bot_status', d => {
+  if (!d.running) botStartTime = null;
+  if (d.mode) {
+    const badge = document.getElementById('term-mode-badge');
+    if (badge) {
+      const isSim = d.mode === 'simulate';
+      badge.className = 'badge ' + (isSim ? 'badge-amber' : 'badge-green');
+      badge.textContent = isSim ? '◈ SIMULATE' : '⚡ LIVE';
+    }
+  }
+});
+</script>
+{% endblock %}

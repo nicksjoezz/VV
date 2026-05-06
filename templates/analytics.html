@@ -1,0 +1,210 @@
+{% extends "base.html" %}
+{% block title %}Analytics{% endblock %}
+{% block page_title %}<span>PROFIT</span> ANALYTICS{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+.chart-wrap { position: relative; }
+.no-data-overlay {
+  position: absolute; inset: 0; display: flex;
+  align-items: center; justify-content: center;
+  font-family: var(--font-hud); font-size: 11px;
+  color: var(--text-lo); letter-spacing: 0.15em;
+}
+.kpi-row { display: grid; grid-template-columns: repeat(5,1fr); gap: 12px; margin-bottom: 20px; }
+
+@media (max-width: 1000px) {
+  .kpi-row { grid-template-columns: 1fr 1fr 1fr; }
+}
+
+@media (max-width: 600px) {
+  .kpi-row { grid-template-columns: 1fr 1fr; }
+}
+.kpi-box {
+  background: var(--bg2); border: 1px solid var(--border);
+  padding: 14px 16px; text-align: center;
+}
+.kpi-val {
+  font-family: var(--font-hud); font-size: 20px; color: var(--green);
+  text-shadow: 0 0 15px #00ff4133;
+}
+.kpi-lbl { font-size: 9px; color: var(--text-lo); letter-spacing: 0.2em; margin-top: 5px; font-family: var(--font-hud); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="kpi-row animate-in">
+  <div class="kpi-box">
+    <div class="kpi-val" id="kpi-total-profit">—</div>
+    <div class="kpi-lbl">TOTAL PROFIT</div>
+  </div>
+  <div class="kpi-box">
+    <div class="kpi-val" id="kpi-today">—</div>
+    <div class="kpi-lbl">TODAY</div>
+  </div>
+  <div class="kpi-box">
+    <div class="kpi-val" id="kpi-total-arbs">—</div>
+    <div class="kpi-lbl">ARBITRAGES</div>
+  </div>
+  <div class="kpi-box">
+    <div class="kpi-val" id="kpi-avg-profit">—</div>
+    <div class="kpi-lbl">AVG PER ARB</div>
+  </div>
+  <div class="kpi-box">
+    <div class="kpi-val" id="kpi-watchlist">—</div>
+    <div class="kpi-lbl">WATCHLIST</div>
+  </div>
+</div>
+
+<div class="grid-2 animate-in" style="margin-bottom:16px">
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title"><span class="dot"></span> Daily Profit (30d)</div>
+    </div>
+    <div class="card-body">
+      <div class="chart-wrap" style="height:200px">
+        <canvas id="daily-chart"></canvas>
+        <div class="no-data-overlay" id="daily-no-data">NO ARBITRAGES YET</div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title"><span class="dot"></span> Daily Count (30d)</div>
+    </div>
+    <div class="card-body">
+      <div class="chart-wrap" style="height:200px">
+        <canvas id="count-chart"></canvas>
+        <div class="no-data-overlay" id="count-no-data">NO ARBITRAGES YET</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card animate-in">
+  <div class="card-header">
+    <div class="card-title"><span class="dot"></span> Arbitrage History</div>
+  </div>
+  <div class="card-body" style="padding:0">
+    <div class="table-responsive">
+      <table class="data-table" id="history-tbl">
+      <thead>
+        <tr>
+          <th>DATE / TIME</th><th>TOKEN</th><th>TYPE</th>
+          <th>GAP</th><th>EST. PROFIT</th><th>TX HASH</th>
+        </tr>
+      </thead>
+      <tbody id="history-body">
+        <tr><td colspan="6" class="dim" style="text-align:center;padding:24px">No history</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const CHART_DEFAULTS = {
+  responsive: true, maintainAspectRatio: false,
+  plugins: { legend: { display: false } },
+  scales: {
+    x: { grid: { color: '#00ff4112' },
+         ticks: { color: '#5a8a62', font: { family: 'IBM Plex Mono', size: 9 }, maxRotation: 45 } },
+    y: { grid: { color: '#00ff4112' },
+         ticks: { color: '#5a8a62', font: { family: 'IBM Plex Mono', size: 9 } } }
+  }
+};
+
+async function load() {
+  const [statsR, histR] = await Promise.all([
+    fetch('/api/stats'),
+    fetch('/api/profit-history')
+  ]);
+  const stats = await statsR.json();
+  const hist  = await histR.json();
+
+  // KPIs
+  setEl('kpi-total-profit', fmtUSD(stats.total_profit_est_usd));
+  setEl('kpi-today',        fmtUSD(stats.today_profit_est_usd));
+  setEl('kpi-total-arbs',   stats.total_arbs);
+  setEl('kpi-avg-profit',
+    stats.total_arbs > 0
+      ? fmtUSD(stats.total_profit_est_usd / stats.total_arbs)
+      : '—'
+  );
+  setEl('kpi-watchlist', fmtNum(stats.watchlist_count));
+
+  // Charts
+  if (hist.length > 0) {
+    document.getElementById('daily-no-data').style.display = 'none';
+    document.getElementById('count-no-data').style.display = 'none';
+
+    const labels  = hist.map(d => d.day).reverse();
+    const profits = hist.map(d => d.profit).reverse();
+    const counts  = hist.map(d => d.count).reverse();
+
+    new Chart(document.getElementById('daily-chart').getContext('2d'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          data: profits,
+          borderColor: '#00ff41',
+          backgroundColor: '#00ff4115',
+          borderWidth: 1.5,
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+          pointBackgroundColor: '#00ff41',
+        }]
+      },
+      options: {
+        ...CHART_DEFAULTS,
+        scales: {
+          ...CHART_DEFAULTS.scales,
+          y: { ...CHART_DEFAULTS.scales.y, ticks: { ...CHART_DEFAULTS.scales.y.ticks, callback: v => '$'+v.toFixed(0) } }
+        }
+      }
+    });
+
+    new Chart(document.getElementById('count-chart').getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          data: counts,
+          backgroundColor: '#00e5ff22',
+          borderColor: '#00e5ff',
+          borderWidth: 1,
+        }]
+      },
+      options: CHART_DEFAULTS
+    });
+  }
+
+  // History table
+  if (stats.recent && stats.recent.length) {
+    const tbody = document.getElementById('history-body');
+    tbody.innerHTML = stats.recent.map(r => {
+      const t = new Date(r.timestamp * 1000);
+      const ts = t.toLocaleDateString() + ' ' + t.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+      const profit = parseFloat(r.estimated_profit) || 0;
+      const tx = r.tx_hash ? r.tx_hash.slice(0,16) + '…' : '—';
+      const gap = r.gap ? (r.gap * 100).toFixed(2) + '%' : '—';
+      return `<tr>
+        <td class="dim" style="font-size:10px">${ts}</td>
+        <td class="cyan mono" style="font-size:10px">${fmtAddr(r.token)}</td>
+        <td><span class="badge badge-cyan" style="font-size:8px">${r.type||'dual'}</span></td>
+        <td>${gap}</td>
+        <td class="${profit>=0?'green':'red'}">${fmtUSD(profit)}</td>
+        <td class="dim" style="font-size:9px;font-family:var(--font-mono)">${tx}</td>
+      </tr>`;
+    }).join('');
+  }
+}
+
+load();
+</script>
+{% endblock %}
