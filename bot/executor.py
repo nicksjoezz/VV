@@ -61,7 +61,7 @@ class ArbExecutor:
         self._account = get_account()
         contract_addr = cfg("wallet", "arb_contract")
 
-        if not contract_addr or contract_addr == "DEPLOY_CONTRACT_ADDRESS_HERE":
+        if not contract_addr or contract_addr.upper().startswith("DEPLOY_"):
             self._contract = None
             logger.warning("arb_contract not set — execution disabled")
         else:
@@ -104,6 +104,7 @@ class ArbExecutor:
                 logger.debug(f"ETH price refreshed: ${price:,.0f}")
         except Exception as e:
             logger.warning(f"ETH price fetch failed, using cached ${self._eth_price:,.0f}: {e}")
+            self._eth_price_ts = time.time()  # back off 5 min before retrying
 
         return self._eth_price
 
@@ -275,7 +276,9 @@ class ArbExecutor:
 
             else:
                 signed  = self._account.sign_transaction(tx)
-                tx_hash = self._w3.eth.send_raw_transaction(signed.raw_transaction)
+                # web3.py v5 uses rawTransaction (camelCase); v6 uses raw_transaction
+                raw_tx  = getattr(signed, 'raw_transaction', None) or getattr(signed, 'rawTransaction', b'')
+                tx_hash = self._w3.eth.send_raw_transaction(raw_tx)
                 logger.info(
                     f"[LIVE] Sent: {tx_hash.hex()} | {opportunity['symbol']} | "
                     f"Flash={amount_flash / 10**dec_in:.4f} | "

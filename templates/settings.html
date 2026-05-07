@@ -347,6 +347,12 @@ async function loadSettings() {
   applyMode(_cfg.mode || 'simulate');
 }
 
+function isPlaceholder(v) {
+  if (!v) return true;
+  const u = v.toUpperCase();
+  return u.startsWith('YOUR_') || u.startsWith('DEPLOY_') || v === '0x…' || v === '0x...';
+}
+
 function populateForm(c) {
   const net = c.network    || {};
   const wal = c.wallet     || {};
@@ -357,8 +363,9 @@ function populateForm(c) {
 
   setVal('cfg-rpc-http',    net.rpc_http || '');
   setVal('cfg-rpc-ws',      net.rpc_ws   || '');
-  setVal('cfg-private-key', wal.private_key || '');
-  setVal('cfg-contract',    wal.arb_contract || '');
+  // Never pre-fill placeholder text into sensitive fields — user must type real values
+  setVal('cfg-private-key', isPlaceholder(wal.private_key)  ? '' : wal.private_key  || '');
+  setVal('cfg-contract',    isPlaceholder(wal.arb_contract) ? '' : wal.arb_contract || '');
 
   setRange('cfg-min-profit', str.min_profit_usd || 1);
   document.getElementById('lbl-min-profit').textContent = '$' + (str.min_profit_usd || 1);

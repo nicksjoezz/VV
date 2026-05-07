@@ -118,7 +118,7 @@ def get_web3() -> Web3:
 def get_account():
     try:
         pk = cfg("wallet", "private_key")
-        if not pk or pk == "YOUR_PRIVATE_KEY_HERE":
+        if not pk or pk.upper().startswith("YOUR_"):
             return None
         return Account.from_key(pk)
     except Exception:

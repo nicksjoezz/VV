@@ -229,7 +229,9 @@ class ArbMonitor:
                     else:
                         amount /= p_t0_t1 if p_t0_t1 > 0 else 1
 
-                if not valid or amount <= 1.002:  # require >0.2% gap
+                # require >0.2% gap and <50% gap
+                # gaps above 50% are garbage from zero-liquidity / rugged tokens
+                if not valid or amount <= 1.002 or amount >= 1.50:
                     continue
 
                 # ── Build per-hop reserve/fee data for multi-hop sizing ────────
@@ -267,6 +269,19 @@ class ArbMonitor:
                         "dec_in":      self.metadata.get(t_in, 18),
                         "dec_out":     self.metadata.get(t_out, 18),
                     })
+
+                # Minimum liquidity guard — reject dead/rugged/test pools.
+                # Each side of every hop must hold at least 0.001 whole tokens
+                # (10^(dec-3) raw units). Below this threshold the 3%-capped
+                # flash loan is too small to cover $20 gas on any realistic gap.
+                # Formula: 10^max(3, dec-3) avoids negative exponents for
+                # low-decimal tokens (e.g. USDC: max(3,3)=10^3 = 0.001 USDC).
+                if any(
+                    h["reserve_in"]  < 10 ** max(3, h["dec_in"]  - 3) or
+                    h["reserve_out"] < 10 ** max(3, h["dec_out"] - 3)
+                    for h in hops
+                ):
+                    continue
 
                 # Top-level reserve_in / dec_in kept for single-pool fallback
                 first_pool  = item["pools"][0].lower()

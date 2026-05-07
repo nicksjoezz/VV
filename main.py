@@ -68,7 +68,7 @@ async def _bot_loop():
         executor = ArbExecutor()
 
         async def on_opportunity(opp):
-            logger.info(f"Opportunity found: {opp['symbol']} Gap: {opp['gap']:.2%}")
+            logger.debug(f"Candidate: {opp['symbol']} gap={opp['gap']:.2%}")
             await executor.execute(opp)
 
         monitor = ArbMonitor(on_opportunity=on_opportunity)
@@ -227,10 +227,16 @@ def api_config():
             else:
                 current[section] = value
 
-        # Guard: never wipe an existing private key with an empty / placeholder value
+        # Guard: never wipe an existing private key with an empty / placeholder value.
+        # Catches exact match, partial match, and truncated placeholders.
+        def _is_placeholder(v):
+            if not v: return True
+            u = v.upper()
+            return u.startswith("YOUR_") or u.startswith("DEPLOY_") or v in ("0x…", "0x...")
+
         existing_pk = (load_config() or {}).get("wallet", {}).get("private_key", "")
         new_pk      = current.get("wallet", {}).get("private_key", "")
-        if not new_pk or new_pk in ("YOUR_PRIVATE_KEY_HERE", "0x…", "0x..."):
+        if _is_placeholder(new_pk):
             current.setdefault("wallet", {})["private_key"] = existing_pk
 
         with open(ROOT / "config.json", "w") as f:
@@ -333,7 +339,8 @@ def api_wallet_withdraw():
                 "maxPriorityFeePerGas": w3.to_wei(cfg("gas", "max_priority_fee_gwei"), "gwei"),
             })
             signed  = account.sign_transaction(tx)
-            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+            raw_tx  = getattr(signed, 'raw_transaction', None) or getattr(signed, 'rawTransaction', b'')
+            tx_hash = w3.eth.send_raw_transaction(raw_tx)
             results.append({"token": sym, "status": "success", "amount": amt, "tx_hash": tx_hash.hex()})
         except Exception as e:
             results.append({"token": sym, "status": "error", "msg": str(e)[:100]})
