@@ -238,6 +238,38 @@ class ArbExecutor:
                 self._nonce += 1
             nonce = self._nonce
 
+        dec_in         = opportunity.get("dec_in", 18)
+        max_fee_gwei   = cfg("gas", "max_fee_per_gas_gwei")
+        prio_fee_gwei  = cfg("gas", "max_priority_fee_gwei")
+        gas_limit      = cfg("gas", "gas_limit")
+        chain_id       = cfg("network", "chain_id")
+        eth_price      = self._get_eth_price_usd()
+        max_fee_wei    = self._w3.to_wei(max_fee_gwei,  "gwei")
+        prio_fee_wei   = self._w3.to_wei(prio_fee_gwei, "gwei")
+        gas_cost_eth   = (max_fee_wei * gas_limit) / 10 ** 18
+        gas_cost_usd   = gas_cost_eth * eth_price
+
+        step_summary = " -> ".join(
+            f"{s['tokenIn'][:6]}../{s['tokenOut'][:6]}.. "
+            f"[dex={s['dex']} fee={s['fee']}]"
+            for s in steps
+        )
+
+        logger.info(
+            f"[TX BUILD] {opportunity['symbol']} | "
+            f"nonce={nonce} | chainId={chain_id}\n"
+            f"  Flash : {amount_flash / 10**dec_in:.6f} tokens "
+            f"(raw={amount_flash})\n"
+            f"  minProfit: {min_profit / 10**dec_in:.6f} tokens "
+            f"(raw={min_profit})\n"
+            f"  Steps : {step_summary}\n"
+            f"  Gas   : limit={gas_limit:,} | "
+            f"maxFee={max_fee_gwei} gwei | "
+            f"priority={prio_fee_gwei} gwei\n"
+            f"  Gas $ : {gas_cost_eth:.6f} ETH "
+            f"(~${gas_cost_usd:.4f} @ ETH=${eth_price:,.0f})"
+        )
+
         return self._contract.functions.executeArb(
             amount_flash,
             checksum(opportunity["tokens"][0]),
@@ -246,10 +278,10 @@ class ArbExecutor:
         ).build_transaction({
             "from":                 self._account.address,
             "nonce":                nonce,
-            "chainId":              cfg("network", "chain_id"),
-            "gas":                  cfg("gas", "gas_limit"),
-            "maxFeePerGas":         self._w3.to_wei(cfg("gas", "max_fee_per_gas_gwei"),    "gwei"),
-            "maxPriorityFeePerGas": self._w3.to_wei(cfg("gas", "max_priority_fee_gwei"),   "gwei"),
+            "chainId":              chain_id,
+            "gas":                  gas_limit,
+            "maxFeePerGas":         max_fee_wei,
+            "maxPriorityFeePerGas": prio_fee_wei,
         })
 
     # ── Main entry point ──────────────────────────────────────────────────────
