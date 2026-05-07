@@ -249,18 +249,28 @@ def api_config():
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)})
 
-_WETH_USDC_POOL = "0xC6962004f452fE5bE02D0E47321ee3deFb746355"
 _BALANCER_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
 _ERC20_BAL_ABI  = [{"inputs":[{"name":"account","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]
 
-def _eth_price(w3) -> float:
+_eth_price_cache: float = 3000.0
+_eth_price_ts:    float = 0.0
+
+def _eth_price(_w3=None) -> float:
+    global _eth_price_cache, _eth_price_ts
+    if time.time() - _eth_price_ts < 300:
+        return _eth_price_cache
     try:
-        raw    = w3.eth.call({"to": checksum(_WETH_USDC_POOL), "data": "0x3850c7bd"})
-        sqrt_p = w3.codec.decode(["uint160"], raw[:32])[0]
-        price  = (sqrt_p / (2 ** 96)) ** 2 * 1e12
-        return price if price > 100 else 3000.0
+        import urllib.request as _ur
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
+        with _ur.urlopen(url, timeout=5) as resp:
+            data  = json.loads(resp.read())
+            price = float(data["ethereum"]["usd"])
+        if price > 100:
+            _eth_price_cache = price
+            _eth_price_ts    = time.time()
     except Exception:
-        return 3000.0
+        _eth_price_ts = time.time()
+    return _eth_price_cache
 
 @app.route("/api/wallet/balances")
 def api_wallet_balances():

@@ -1,4 +1,7 @@
 import time
+import threading
+import urllib.request
+import json
 from .utils import get_web3, get_account, cfg, checksum, logger
 from .database import record_execution
 from .arb_math import calculate_optimal_multihop
@@ -40,10 +43,15 @@ DEX_TYPE_MAP = {
     "sushiv2":   4,
 }
 
-# WETH/USDC.e UniV3 0.05% pool on Arbitrum — used to price ETH in USD.
-# token0=WETH(18 dec), token1=USDC.e(6 dec) → price = (sqrtP/2^96)^2 * 10^12
-_WETH_USDC_POOL = "0xC6962004f452fE5bE02D0E47321ee3deFb746355"
-_SEL_SLOT0      = "0x3850c7bd"
+_COINGECKO_URL = (
+    "https://api.coingecko.com/api/v3/simple/price"
+    "?ids=ethereum&vs_currencies=usd"
+)
+
+# Maximum sane flash-loan size and profit in USD — guards against ghost
+# opportunities from pools with inflated/fake reserves.
+_MAX_FLASH_USD  = 100_000.0   # reject if flash loan > $100k
+_MAX_PROFIT_USD =  50_000.0   # reject if projected profit > $50k
 
 
 def get_mode() -> str:
@@ -74,6 +82,11 @@ class ArbExecutor:
         self._eth_price: float      = 3000.0
         self._eth_price_ts: float   = 0.0
 
+        # Thread-safe nonce counter to prevent races when multiple opportunities
+        # fire concurrently (all would get the same pending nonce otherwise).
+        self._nonce_lock  = threading.Lock()
+        self._nonce: int  = -1
+
         logger.info(
             f"ArbExecutor ready | Contract: "
             f"{contract_addr[:10] if self._contract else 'None'}"
@@ -82,29 +95,21 @@ class ArbExecutor:
     # ── ETH price ─────────────────────────────────────────────────────────────
 
     def _get_eth_price_usd(self) -> float:
-        """
-        Returns ETH/USD price fetched from the on-chain WETH/USDC.e UniV3 pool.
-        Result is cached for 5 minutes to avoid extra RPC calls on every opportunity.
-        """
+        """Returns ETH/USD from CoinGecko public API, cached for 5 minutes."""
         if time.time() - self._eth_price_ts < 300:
             return self._eth_price
 
         try:
-            raw = self._w3.eth.call({
-                "to":   checksum(_WETH_USDC_POOL),
-                "data": _SEL_SLOT0,
-            })
-            # token0=WETH(18), token1=USDC.e(6)
-            # price_weth_in_usdc = (sqrtP/2^96)^2 * 10^(18-6) = (sqrtP/2^96)^2 * 10^12
-            sqrt_p = self._w3.codec.decode(["uint160"], raw[:32])[0]
-            price  = (sqrt_p / (2 ** 96)) ** 2 * (10 ** 12)
-            if price > 100:                          # sanity check
+            with urllib.request.urlopen(_COINGECKO_URL, timeout=5) as resp:
+                data  = json.loads(resp.read())
+                price = float(data["ethereum"]["usd"])
+            if price > 100:
                 self._eth_price    = price
                 self._eth_price_ts = time.time()
                 logger.debug(f"ETH price refreshed: ${price:,.0f}")
         except Exception as e:
             logger.warning(f"ETH price fetch failed, using cached ${self._eth_price:,.0f}: {e}")
-            self._eth_price_ts = time.time()  # back off 5 min before retrying
+            self._eth_price_ts = time.time()
 
         return self._eth_price
 
@@ -132,7 +137,25 @@ class ArbExecutor:
         profit_tokens  = gap * (amount_flash / 10 ** dec_in)
         profit_usd     = self._to_usd(profit_tokens, dec_in)
 
-        # 1. Minimum profit threshold (from config)
+        # 1a. Flash loan USD cap — rejects ghost opportunities from pools with
+        #     inflated reserves (e.g. 14 000 ETH flash = clearly bogus).
+        flash_usd = self._to_usd(amount_flash / 10 ** dec_in, dec_in)
+        if flash_usd > _MAX_FLASH_USD:
+            logger.warning(
+                f"Skip {opportunity['symbol']}: flash ${flash_usd:,.0f} > "
+                f"max ${_MAX_FLASH_USD:,.0f}"
+            )
+            return False, profit_usd, 0.0
+
+        # 1b. Profit sanity cap — real Arbitrum arb does not return $50 000+.
+        if profit_usd > _MAX_PROFIT_USD:
+            logger.warning(
+                f"Skip {opportunity['symbol']}: profit ${profit_usd:,.0f} > "
+                f"sanity cap ${_MAX_PROFIT_USD:,.0f}"
+            )
+            return False, profit_usd, 0.0
+
+        # 2. Minimum profit threshold (from config)
         min_profit_usd = cfg("strategy", "min_profit_usd")
         if profit_usd < min_profit_usd:
             logger.debug(
@@ -141,7 +164,7 @@ class ArbExecutor:
             )
             return False, profit_usd, 0.0
 
-        # 2. Gas cost in USD using current on-chain gas price
+        # 3. Gas cost in USD using current on-chain gas price
         try:
             gas_price_wei = self._w3.eth.gas_price          # current base + priority
         except Exception:
@@ -205,7 +228,15 @@ class ArbExecutor:
             for i in range(len(opportunity["pools"]))
         ]
 
-        nonce = self._w3.eth.get_transaction_count(self._account.address, "pending")
+        with self._nonce_lock:
+            on_chain = self._w3.eth.get_transaction_count(self._account.address, "pending")
+            # Use max(on_chain, local+1) so concurrent calls each get a unique nonce
+            # even if the node hasn't seen the previous tx yet.
+            if self._nonce < on_chain:
+                self._nonce = on_chain
+            else:
+                self._nonce += 1
+            nonce = self._nonce
 
         return self._contract.functions.executeArb(
             amount_flash,
