@@ -207,10 +207,41 @@ def api_logs():
         pass
     return jsonify({"logs": []})
 
-@app.route("/api/config")
+@app.route("/api/config", methods=["GET", "POST"])
 def api_config():
-    c = load_config() or {}
-    return jsonify({k: v for k, v in c.items() if k != "wallet"})
+    if request.method == "GET":
+        # Include wallet so the settings form can populate all fields.
+        # Private key is masked in the UI (input type="password") and this
+        # server only listens on localhost, so local exposure is acceptable.
+        return jsonify(load_config() or {})
+
+    # POST — save updated config
+    try:
+        incoming = request.get_json(force=True) or {}
+        current  = load_config() or {}
+
+        # Deep-merge: incoming fields overwrite current ones
+        for section, value in incoming.items():
+            if isinstance(value, dict) and isinstance(current.get(section), dict):
+                current[section].update(value)
+            else:
+                current[section] = value
+
+        # Guard: never wipe an existing private key with an empty / placeholder value
+        existing_pk = (load_config() or {}).get("wallet", {}).get("private_key", "")
+        new_pk      = current.get("wallet", {}).get("private_key", "")
+        if not new_pk or new_pk in ("YOUR_PRIVATE_KEY_HERE", "0x…", "0x..."):
+            current.setdefault("wallet", {})["private_key"] = existing_pk
+
+        with open(ROOT / "config.json", "w") as f:
+            json.dump(current, f, indent=2)
+
+        # Bust the in-memory config cache so the bot picks up the change
+        import bot.utils as _u; _u._config = None
+
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)})
 
 _WETH_USDC_POOL = "0xC6962004f452fE5bE02D0E47321ee3deFb746355"
 _BALANCER_VAULT = "0xBA12222222228d8Ba445958a75a0704d566BF2C8"
