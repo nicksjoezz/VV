@@ -87,6 +87,11 @@ class ArbExecutor:
         self._nonce_lock  = threading.Lock()
         self._nonce: int  = -1
 
+        # Per-path execution cooldown — prevents re-firing the same symbol
+        # every scan cycle when txs revert (gap stays open, bot loops forever).
+        self._cooldown: dict  = {}   # symbol -> last execute timestamp
+        self._cooldown_sec    = 60   # seconds to suppress a path after execution
+
         logger.info(
             f"ArbExecutor ready | Contract: "
             f"{contract_addr[:10] if self._contract else 'None'}"
@@ -115,11 +120,22 @@ class ArbExecutor:
 
     # ── Gas & profit checks ───────────────────────────────────────────────────
 
-    def _to_usd(self, amount_tokens: float, dec_in: int) -> float:
-        """Convert a token amount to approximate USD value."""
-        if dec_in == 6:          # USDC / USDC.e — already USD-pegged
-            return amount_tokens
-        return amount_tokens * self._get_eth_price_usd()
+    def _to_usd(self, amount_tokens: float, dec_in: int, token_addr: str = "") -> float:
+        """Convert a token amount to approximate USD value.
+
+        Only USDC (dec=6) and WETH get a real USD price.
+        All other tokens return their raw amount so callers don't
+        accidentally multiply an ARB/PENDLE profit by the ETH price.
+        """
+        if dec_in == 6:
+            return amount_tokens                        # USDC / USDC.e
+        weth = cfg("network", "weth").lower()
+        if token_addr.lower() == weth:
+            return amount_tokens * self._get_eth_price_usd()
+        # Unknown token — treat 1 token = $1 as a floor so USD checks
+        # are not inflated.  Paths denominated in non-WETH tokens will
+        # need to exceed min_profit_usd in raw-token units.
+        return amount_tokens
 
     def _check_viable(
         self,
@@ -133,13 +149,14 @@ class ArbExecutor:
         Returns (ok: bool, profit_usd: float, gas_cost_usd: float).
         Logs the reason and returns False when any check fails.
         """
+        token0         = opportunity.get("tokens", [""])[0]
         gap            = opportunity.get("gap", 0)
         profit_tokens  = gap * (amount_flash / 10 ** dec_in)
-        profit_usd     = self._to_usd(profit_tokens, dec_in)
+        profit_usd     = self._to_usd(profit_tokens, dec_in, token0)
 
         # 1a. Flash loan USD cap — rejects ghost opportunities from pools with
         #     inflated reserves (e.g. 14 000 ETH flash = clearly bogus).
-        flash_usd = self._to_usd(amount_flash / 10 ** dec_in, dec_in)
+        flash_usd = self._to_usd(amount_flash / 10 ** dec_in, dec_in, token0)
         if flash_usd > _MAX_FLASH_USD:
             logger.warning(
                 f"Skip {opportunity['symbol']}: flash ${flash_usd:,.0f} > "
@@ -152,6 +169,15 @@ class ArbExecutor:
             logger.warning(
                 f"Skip {opportunity['symbol']}: profit ${profit_usd:,.0f} > "
                 f"sanity cap ${_MAX_PROFIT_USD:,.0f}"
+            )
+            return False, profit_usd, 0.0
+
+        # 1c. Gap sanity cap — a gap above 5% in a multi-hop path almost always
+        #     means a scam/honeypot token is creating a fake price signal.
+        #     Legitimate liquid-market arb rarely exceeds 2-3%.
+        if gap > 0.05:
+            logger.warning(
+                f"Skip {opportunity['symbol']}: gap {gap:.2%} > 5% sanity cap"
             )
             return False, profit_usd, 0.0
 
@@ -296,10 +322,21 @@ class ArbExecutor:
             )
             return None
 
+        symbol = opportunity["symbol"]
+
+        # Cooldown — suppress the same path for 60s after execution so a
+        # reverting tx doesn't cause the bot to loop on the same opportunity.
+        elapsed = time.time() - self._cooldown.get(symbol, 0)
+        if elapsed < self._cooldown_sec:
+            logger.debug(
+                f"Skip {symbol}: cooldown ({elapsed:.0f}s < {self._cooldown_sec}s)"
+            )
+            return None
+
         amount_flash, dec_in = self._get_flash_amount(opportunity)
 
         if amount_flash == 0:
-            logger.debug(f"Skip {opportunity['symbol']}: no reserve data for sizing")
+            logger.debug(f"Skip {symbol}: no reserve data for sizing")
             return None
 
         # ── Pre-flight: profit & gas checks ───────────────────────────────────
@@ -327,14 +364,15 @@ class ArbExecutor:
             if mode == "simulate":
                 self._w3.eth.call(tx)
                 logger.info(
-                    f"[SIMULATE] [OK] {opportunity['symbol']} | "
+                    f"[SIMULATE] [OK] {symbol} | "
                     f"Gap={opportunity['gap']:.3%} | "
                     f"Flash={amount_flash / 10**dec_in:.4f} | "
                     f"Profit≈${profit_usd:.2f} | "
                     f"Gas≈${gas_cost_usd:.4f}"
                 )
-                record_payload["tx_hash"] = f"sim-{int(time.time())}-{opportunity['symbol']}"
+                record_payload["tx_hash"] = f"sim-{int(time.time())}-{symbol}"
                 record_execution(record_payload)
+                self._cooldown[symbol] = time.time()
                 return "sim-success"
 
             else:
@@ -343,12 +381,13 @@ class ArbExecutor:
                 raw_tx  = getattr(signed, 'raw_transaction', None) or getattr(signed, 'rawTransaction', b'')
                 tx_hash = self._w3.eth.send_raw_transaction(raw_tx)
                 logger.info(
-                    f"[LIVE] Sent: {tx_hash.hex()} | {opportunity['symbol']} | "
+                    f"[LIVE] Sent: {tx_hash.hex()} | {symbol} | "
                     f"Flash={amount_flash / 10**dec_in:.4f} | "
                     f"Profit≈${profit_usd:.2f} | Gas≈${gas_cost_usd:.4f}"
                 )
                 record_payload["tx_hash"] = tx_hash.hex()
                 record_execution(record_payload)
+                self._cooldown[symbol] = time.time()
                 return tx_hash.hex()
 
         except Exception as e:

@@ -270,15 +270,16 @@ class ArbMonitor:
                         "dec_out":     self.metadata.get(t_out, 18),
                     })
 
-                # Minimum liquidity guard — reject dead/rugged/test pools.
-                # Each side of every hop must hold at least 0.001 whole tokens
-                # (10^(dec-3) raw units). Below this threshold the 3%-capped
-                # flash loan is too small to cover $20 gas on any realistic gap.
-                # Formula: 10^max(3, dec-3) avoids negative exponents for
-                # low-decimal tokens (e.g. USDC: max(3,3)=10^3 = 0.001 USDC).
+                # Minimum liquidity guard — reject low-liquidity, dead, and
+                # scam token pools (e.g. E280 which has near-zero real depth).
+                # Each side of every hop must hold at least min_reserve_tokens
+                # whole tokens. Config key: strategy.min_reserve_tokens (default 100).
+                # For dec=18: 100 tokens (e.g. 100 WETH / 100 PENDLE).
+                # For dec=6:  100 USDC  = $100 — keeps the check token-agnostic.
+                _min_r = (cfg("strategy", "min_reserve_tokens") or 100)
                 if any(
-                    h["reserve_in"]  < 10 ** max(3, h["dec_in"]  - 3) or
-                    h["reserve_out"] < 10 ** max(3, h["dec_out"] - 3)
+                    h["reserve_in"]  < _min_r * 10 ** h["dec_in"] or
+                    h["reserve_out"] < _min_r * 10 ** h["dec_out"]
                     for h in hops
                 ):
                     continue
