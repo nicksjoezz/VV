@@ -1,211 +1,212 @@
 import json
 import asyncio
+import time
+import urllib.request
 from typing import List
 from collections import defaultdict
-from web3 import Web3
-from .utils import ROOT_DIR, logger, checksum, cfg, MULTICALL3_ADDR, MULTICALL3_ABI
+from .utils import ROOT_DIR, logger, checksum, get_web3, MULTICALL3_ADDR, MULTICALL3_ABI
 
-WATCHLIST_PATH = ROOT_DIR / "logs" / "watchlist.json"
+WATCHLIST_PATH  = ROOT_DIR / "logs" / "watchlist.json"
 POOL_CACHE_PATH = ROOT_DIR / "logs" / "pool_cache.json"
 
-# FREE public Arbitrum RPCs from research
-DISCOVERY_RPCS = [
-    "https://arb1.arbitrum.io/rpc",
-    "https://arbitrum.llamarpc.com",
-    "https://rpc.ankr.com/arbitrum",
-    "https://arbitrum-one.public.blastapi.io"
+# ── DexScreener pool discovery ────────────────────────────────────────────────
+
+# Minimum pool liquidity in USD — excludes dead / near-empty pools.
+MIN_POOL_LIQUIDITY = 10_000    # $10k
+
+# Anchor tokens used to seed DexScreener queries. Every Arbitrum pair
+# involving any of these tokens is fetched and filtered by liquidity.
+ANCHOR_TOKENS = [
+    "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",  # WETH
+    "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",  # USDC (native)
+    "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",  # USDT
+    "0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f",  # WBTC
+    "0xFF970A61A04b1cA14834A43f5dE4533eBDDB5CC8",  # USDC.e (bridged)
+    "0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1",  # DAI
+    "0x912CE59144191C1204E64559FE8253a0e49E6548",  # ARB
+    "0xf97f4df75117a78c1A5a0DBb814Af92458539FB4",  # LINK
+    "0xFa7F8980b0f1E64A2062791cc3b0871572f1F7f2",  # UNI
+    "0x0c880f6761F1af8d9Aa9C466984b80DAb9a8c9e8",  # PENDLE
+    "0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a",  # GMX
+    "0x11cDb42B0EB46D95f990BeDD4695A6e3fA034978",  # CRV
+    "0xba5DdD1f9d7F570dc94a51479a000E3BCE967196",  # AAVE
+    "0x5979D7b546E38E414F7E9822514be443A4800529",  # wstETH
+    "0x35751007a407ca6FEFfE80b3cB397736D2cf4dbe",  # weETH
+    "0x2416092f143378750bb29b79eD961ab195CcEea5",  # ezETH
+    "0xEC70Dcb4A1EFa46b8F2D97C310C9c4790ba5ffA8",  # rETH
+    "0x498Bf2B1E120FeD3ad3D42EA2165E9b73f99C1e5",  # crvUSD
+    "0x7dfF72693f6A4149b17e7C6314655f6a9F7c8B33",  # GHO
+    "0x6c84a8f1c29108F47a79964b5Fe888D4f4D0dE40",  # tBTC
+    "0xcbB7C0000ab88B473b1f5aFd9ef808440eed33Bf",  # cbBTC
+    "0x3082CC23568ea640225c2467653dB90e9250aaa0",  # RDNT
+    "0x18c11FD286C5EC11c3b683Caa813b77f5163A122",  # GNS
+    "0x93b346b6BC2548dA6A1E7d98E9a421B42541425b",  # LUSD
+    "0x6985884C4392D348587B19cb9eAAf157F13271cd",  # ZRO
+    "0x13Ad51ed4F1B7e9Dc168d8a00cB3f4dDD85EfA60",  # LDO
+    "0x9d2F299715D94d8A7E6F5eaa8E654E8c74a988A7",  # FXS
+    "0x4e352cf164e64adcbad318c3a1e222e9eba4ce42",  # MCB
+    "0x539bdE0d7Dbd336b79148AA742883198BBF60342",  # MAGIC
+    "0x6694340fc020c5E6B96567843da2df01b2CE1eb6",  # STG
 ]
 
-def get_discovery_w3():
-    for rpc in DISCOVERY_RPCS:
-        try:
-            w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
-            if w3.is_connected():
-                return w3
-        except Exception:
-            continue
-    return Web3(Web3.HTTPProvider(cfg("network", "rpc_http")))
-
-FACTORIES = {
-    # Uniswap V3 — dominant on Arbitrum (~70% spot DEX volume). Verified factory + router.
-    "uniswap_v3": {
-        "address": "0x1F98431c8aD98523631AE4a59f267346ea31F984",
-        "deploy_block": 165,
-        "type": "univ3",
-        "topic": Web3.keccak(text="PoolCreated(address,address,uint24,int24,address)").hex()
-    },
-    # Camelot V3 (Algebra) — #2 DEX on Arbitrum, ~$76M/day. Verified factory + router.
-    "camelot_v3": {
-        "address": "0x1a3c9B1d2F0529D97f2afC5136Cc23e58f1FD35B",
-        "deploy_block": 71408700,
-        "type": "algebra",
-        "topic": Web3.keccak(text="Pool(address,address,address)").hex()
-    },
-    # Camelot V2 — active classic AMM pools (xGRAIL pairs, legacy). Verified.
-    "camelot_v2": {
-        "address": "0x6EcCab422D763aC031210895C81787E87B43A652",
-        "deploy_block": 40000000,
-        "type": "univ2",
-        "topic": Web3.keccak(text="PairCreated(address,address,address,uint256)").hex()
-    },
-    # Uniswap V2 — officially deployed on Arbitrum in 2024. Thin liquidity but valid.
-    "uniswap_v2": {
-        "address": "0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9",
-        "deploy_block": 178000000,
-        "type": "univ2",
-        "topic": Web3.keccak(text="PairCreated(address,address,address,uint256)").hex()
-    },
-    # SushiSwap V2 — active, cross-chain factory. Verified factory + router.
-    "sushiswap_v2": {
-        "address": "0xc35DADB65012eC5796536bD9864eD8773aBc74C4",
-        "deploy_block": 100000000,
-        "type": "univ2",
-        "topic": Web3.keccak(text="PairCreated(address,address,address,uint256)").hex()
-    },
-    # NOTE: sushiswap_v3 removed — its SwapRouter uses Route Processor architecture
-    # (incompatible with ISwapRouter.exactInputSingle used by our contract).
-    # NOTE: ramses_v2 removed — factory address was the LP NFT contract (not pool deployer),
-    # and Ramses V2 volume is ~$25K/day (too low for viable arb after gas costs).
+# Maps DexScreener dexId to (version string, default fee in ppm).
+# Version strings must match executor.py's DEX_TYPE_MAP keys.
+DEXSCREENER_DEX_MAP = {
+    "uniswap":        ("univ3",   3000),
+    "uniswap-v3":     ("univ3",   3000),
+    "uniswap-v2":     ("univ2",   3000),
+    "camelot":        ("algebra", 0),
+    "camelot-v3":     ("algebra", 0),
+    "sushiswap":      ("sushiv2", 3000),
+    "sushiswap-v3":   ("univ3",   3000),
 }
 
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"type":"function"},{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"}]')
 
+# fee() selector for Uniswap V3 pools: keccak256("fee()")[0:4]
+_SEL_FEE = "0xddca3f43"
+
+
+async def _discover_pools_dexscreener() -> list:
+    """
+    Query DexScreener for all Arbitrum pairs of every anchor token.
+    Filters to supported DEXes and MIN_POOL_LIQUIDITY.
+    Returns pool dicts: {dex, pool, token0, token1, fee, type, liq_usd}.
+    """
+    seen  = set()
+    pools = []
+
+    for i, addr in enumerate(ANCHOR_TOKENS):
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{addr}"
+        try:
+            req = urllib.request.Request(
+                url, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+            pairs = [p for p in (data.get("pairs") or []) if p.get("chainId") == "arbitrum"]
+        except Exception as e:
+            logger.warning(f"DexScreener [{addr[:10]}]: {e}")
+            pairs = []
+
+        kept = 0
+        for p in pairs:
+            liq    = float((p.get("liquidity") or {}).get("usd") or 0)
+            dex_id = (p.get("dexId") or "").lower()
+
+            if liq < MIN_POOL_LIQUIDITY or dex_id not in DEXSCREENER_DEX_MAP:
+                continue
+
+            # Require non-zero 24h volume AND at least 1 trade — filters dead pools
+            # that have liquidity sitting in them but no actual activity.
+            txns   = p.get("txns", {}).get("h24", {})
+            vol24  = float((p.get("volume") or {}).get("h24") or 0)
+            trades = int(txns.get("buys", 0)) + int(txns.get("sells", 0))
+            if vol24 == 0 or trades == 0:
+                continue
+
+            pool_addr  = (p.get("pairAddress") or "").lower()
+            base_addr  = (p.get("baseToken")   or {}).get("address", "").lower()
+            quote_addr = (p.get("quoteToken")  or {}).get("address", "").lower()
+
+            if not pool_addr or not base_addr or not quote_addr:
+                continue
+            if pool_addr in seen:
+                continue
+            seen.add(pool_addr)
+
+            version, default_fee = DEXSCREENER_DEX_MAP[dex_id]
+            pools.append({
+                "dex":      dex_id,
+                "pool":     pool_addr,
+                "token0":   base_addr,
+                "token1":   quote_addr,
+                "fee":      default_fee,
+                "type":     version,
+                "liq_usd":  liq,
+                "vol24":    vol24,
+                "trades24": trades,
+            })
+            kept += 1
+
+        logger.info(
+            f"DexScreener [{i+1}/{len(ANCHOR_TOKENS)}] "
+            f"{addr[:10]}... +{kept} pools ({len(pools)} total)"
+        )
+        await asyncio.sleep(0.4)   # ~150 req/min — well inside free tier
+
+    logger.info(f"DexScreener discovery: {len(pools)} pools across {len(ANCHOR_TOKENS)} anchor tokens")
+    return pools
+
+
 class OnChainScout:
     def __init__(self):
-        self.w3 = get_discovery_w3()
+        self.w3         = get_web3()
         self.pool_cache = self._load_cache()
 
-    def _load_cache(self):
-        empty = {"last_blocks": {}, "pools": []}
+    # ── Cache ─────────────────────────────────────────────────────────────────
+
+    def _load_cache(self) -> dict:
+        empty = {"pools": [], "timestamp": 0}
         if POOL_CACHE_PATH.exists():
             try:
-                with open(POOL_CACHE_PATH, "r") as f:
+                with open(POOL_CACHE_PATH) as f:
                     data = json.load(f)
-                # Drop pools from DEXes that are no longer in FACTORIES
-                # (e.g. sushiswap_v3 had wrong address, ramses_v2 was an NFT contract)
-                active_dexes = set(FACTORIES.keys())
-                before = len(data.get("pools", []))
-                data["pools"] = [p for p in data.get("pools", []) if p.get("dex") in active_dexes]
-                pruned = before - len(data["pools"])
-                if pruned:
-                    logger.info(f"Pruned {pruned} stale pools from removed DEXes")
-                # Also drop last_block entries for removed DEXes
-                data["last_blocks"] = {k: v for k, v in data.get("last_blocks", {}).items() if k in active_dexes}
+                # Accept both old format (list) and new format (dict with timestamp)
+                if isinstance(data, list):
+                    return {"pools": data, "timestamp": 0}
                 return data
             except Exception:
-                return empty
+                pass
         return empty
 
-    def _save_cache(self):
+    def _save_cache(self, pools: list):
+        entry = {"pools": pools, "timestamp": time.time()}
         with open(POOL_CACHE_PATH, "w") as f:
-            json.dump(self.pool_cache, f, indent=2)
+            json.dump(entry, f, indent=2)
+        self.pool_cache = entry
 
-    async def fetch_logs(self, factory_name, config, to_block):
-        # Scan last 50M blocks (~6 months) for broad coverage
-        default_start = max(config["deploy_block"], to_block - 50000000)
-        from_block = self.pool_cache["last_blocks"].get(factory_name, default_start)
+    # ── V3 fee resolution ─────────────────────────────────────────────────────
 
-        if from_block >= to_block: return []
+    def resolve_v3_fees(self, pools: list) -> list:
+        """
+        Replace default fee values for univ3 pools with the actual on-chain fee().
+        One Multicall3 batch = one RPC call for all V3 pools.
+        """
+        MC3_ABI = json.loads('[{"inputs":[{"internalType":"bool","name":"requireSuccess","type":"bool"},{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"struct Multicall3.Call[]","name":"calls","type":"tuple[]"}],"name":"tryAggregate","outputs":[{"components":[{"internalType":"bool","name":"success","type":"bool"},{"internalType":"bytes","name":"returnData","type":"bytes"}],"internalType":"struct Multicall3.Result[]","name":"returnData","type":"tuple[]"}],"stateMutability":"payable","type":"function"}]')
+        mc = self.w3.eth.contract(address=checksum(MULTICALL3_ADDR), abi=MC3_ABI)
 
-        all_logs = []
-        batch_size = 50000 # Research suggests 50k
-        current = from_block
+        v3_idx   = [i for i, p in enumerate(pools) if p["type"] == "univ3"]
+        v3_pools = [pools[i] for i in v3_idx]
+        if not v3_pools:
+            return pools
 
-        logger.info(f"Scanning {factory_name} from {current} to {to_block}...")
-
-        # Limit per cycle to 50M blocks to get more pairs quickly
-        cycle_limit = 50000000
-        target_to = min(to_block, current + cycle_limit)
-
-        while current < target_to:
-            end = min(current + batch_size, target_to)
-            try:
-                logs = self.w3.eth.get_logs({
-                    "address": checksum(config["address"]),
-                    "fromBlock": current,
-                    "toBlock": end,
-                    "topics": [config["topic"]]
-                })
-                all_logs.extend(logs)
-                current = end + 1
-                if logs: logger.info(f"Found {len(logs)} logs in {factory_name} (Total: {len(all_logs)})")
-                await asyncio.sleep(0.1) # Be nice to public RPCs
-            except Exception as e:
-                if "limit" in str(e).lower() or "range" in str(e).lower() or "too many" in str(e).lower():
-                    batch_size //= 2
-                    logger.warning(f"Reducing batch size to {batch_size} for {factory_name}")
-                    if batch_size < 100: break
-                else:
-                    logger.error(f"Error fetching logs for {factory_name}: {e}")
-                    break
-
-        self.pool_cache["last_blocks"][factory_name] = current
-        return all_logs
-
-    def parse_log(self, log, factory_name):
-        config = FACTORIES[factory_name]
+        calls = [{"target": checksum(p["pool"]), "callData": _SEL_FEE} for p in v3_pools]
         try:
-            topics = log["topics"]
-            data = log["data"]
-            if isinstance(data, bytes): data = data.hex()
-            if data.startswith("0x"): data = data[2:]
+            results = mc.functions.tryAggregate(False, calls).call()
+            resolved = 0
+            for j, (success, data) in enumerate(results):
+                if success and data:
+                    try:
+                        fee = self.w3.codec.decode(["uint24"], data)[0]
+                        pools[v3_idx[j]]["fee"] = fee
+                        resolved += 1
+                    except Exception:
+                        pass
+            logger.info(f"V3 fee resolution: {resolved}/{len(v3_pools)} pools resolved")
+        except Exception as e:
+            logger.warning(f"V3 fee resolution failed (using defaults): {e}")
 
-            token0 = checksum("0x" + topics[1].hex()[-40:])
-            token1 = checksum("0x" + topics[2].hex()[-40:])
+        return pools
 
-            pool_address = ""
-            fee = 0
-            ptype = "univ2"  # safe default; overwritten below
+    # ── Pool refresh ──────────────────────────────────────────────────────────
 
-            if config["type"] == "univ3":
-                fee = int(topics[3].hex(), 16)
-                pool_address = checksum("0x" + data[-40:])
-                ptype = "univ3"
-            elif config["type"] == "algebra":
-                pool_address = checksum("0x" + data[-40:])
-                ptype = "algebra"
-            elif config["type"] == "univ2":
-                pool_address = checksum("0x" + data[24:64])
-                fee = 3000
-                if factory_name == "camelot_v2":
-                    ptype = "camelotv2"
-                elif "sushi" in factory_name:
-                    ptype = "sushiv2"
-                else:
-                    ptype = "univ2"
+    async def refresh_pools(self):
+        pools = await _discover_pools_dexscreener()
+        pools = self.resolve_v3_fees(pools)
+        self._save_cache(pools)
 
-            return {
-                "dex": factory_name,
-                "pool": pool_address,
-                "token0": token0,
-                "token1": token1,
-                "fee": fee,
-                "type": ptype
-            }
-        except Exception:
-            return None
-
-    async def scan_factories(self):
-        try:
-            latest_block = self.w3.eth.block_number
-        except Exception:
-            return
-
-        new_pools = []
-        for name, config in FACTORIES.items():
-            logs = await self.fetch_logs(name, config, latest_block)
-            for log in logs:
-                p = self.parse_log(log, name)
-                if p: new_pools.append(p)
-
-        existing_pools = {p["pool"].lower() for p in self.pool_cache["pools"]}
-        for p in new_pools:
-            if p["pool"].lower() not in existing_pools:
-                self.pool_cache["pools"].append(p)
-                existing_pools.add(p["pool"].lower())
-
-        self._save_cache()
-        logger.info(f"Total pools in cache: {len(self.pool_cache['pools'])}")
+    # ── Token metadata ────────────────────────────────────────────────────────
 
     async def get_token_metadata(self, token_addresses: List[str]):
         token_addresses = list(set(token_addresses))
@@ -223,20 +224,16 @@ class OnChainScout:
                 calls.append((checksum(addr), contract.encodeABI("decimals")))
 
             try:
-                # multicall3 returns [blockNumber, returnData[]]
                 _, return_data = mc_contract.functions.aggregate(calls).call()
-
                 for j, addr in enumerate(batch):
                     try:
                         try:
                             sym = self.w3.codec.decode(["string"], return_data[j*2])[0]
                         except Exception:
-                            sym = self.w3.codec.decode(["bytes32"], return_data[j*2])[0].decode('utf-8').strip('\x00')
-
+                            sym = self.w3.codec.decode(["bytes32"], return_data[j*2])[0].decode("utf-8").strip("\x00")
                         dec = self.w3.codec.decode(["uint8"], return_data[j*2+1])[0]
                         results[addr.lower()] = {"symbol": sym, "decimals": dec}
-                    except Exception as e:
-                        logger.debug(f"Metadata fail for {addr}: {e}")
+                    except Exception:
                         results[addr.lower()] = {"symbol": addr[:6], "decimals": 18}
             except Exception as e:
                 logger.warning(f"Multicall metadata failed: {e}")
@@ -245,123 +242,121 @@ class OnChainScout:
 
         return results
 
+    # ── Watchlist builder ─────────────────────────────────────────────────────
+
     async def filter_and_build_watchlist(self):
-        pools = self.pool_cache["pools"]
+        all_pools = self.pool_cache.get("pools", [])
+        logger.info(f"Building watchlist from {len(all_pools)} DexScreener pools")
+
+        # Group pools by sorted token pair
         by_pair = defaultdict(list)
-        for p in pools:
+        for p in all_pools:
             pair = tuple(sorted([p["token0"].lower(), p["token1"].lower()]))
             by_pair[pair].append(p)
 
-        # Dynamic base token selection (Top 100 most connected tokens)
-        token_counts = defaultdict(int)
-        for p in pools:
-            token_counts[p["token0"].lower()] += 1
-            token_counts[p["token1"].lower()] += 1
-
-        # Sort by pool count and take top 100
-        sorted_tokens = sorted(token_counts.items(), key=lambda x: x[1], reverse=True)
-        base_tokens = [t[0] for t in sorted_tokens[:100]]
-        logger.info(f"Dynamically selected {len(base_tokens)} base tokens for triangular paths.")
-
-        watchlist = []
-        needed_tokens = set()
-
-        # 1. Dual-DEX Pairs
-        for pair, pair_pools in by_pair.items():
-            dexes = {p["dex"] for p in pair_pools}
-            if len(dexes) >= 2:
-                needed_tokens.add(pair[0]); needed_tokens.add(pair[1])
-                # Pick the best pool for each DEX (often there's only one, or multiple fee tiers)
-                best_by_dex = {}
-                for p in pair_pools:
-                    prev = best_by_dex.get(p["dex"])
-                    if prev is None:
-                        best_by_dex[p["dex"]] = p
-                    elif p["type"] in ("univ3", "algebra"):
-                        # For V3, prefer the lowest fee tier — those pools
-                        # attract the deepest liquidity (e.g. USDC/WETH 0.05%)
-                        if p["fee"] < prev["fee"]:
-                            best_by_dex[p["dex"]] = p
-                    else:
-                        # For V2 there's only one pool per pair; first entry wins
-                        pass
-
-                dex_names = list(best_by_dex.keys())
-                for i in range(len(dex_names)):
-                    for j in range(i+1, len(dex_names)):
-                        d1, d2 = dex_names[i], dex_names[j]
-                        p1, p2 = best_by_dex[d1], best_by_dex[d2]
-                        watchlist.append({
-                            "type": "dual",
-                            "tokens": [p1["token0"], p1["token1"], p1["token0"]],
-                            "dexes": [d1, d2],
-                            "pools": [p1["pool"], p2["pool"]],
-                            "versions": [p1["type"], p2["type"]],
-                            "fees": [p1["fee"], p2["fee"]]
-                        })
-
-        # 2. Triangular Paths
-        # Build adjacency list
+        # Build adjacency list for triangular path search
         adj = defaultdict(list)
-        for p in pools:
+        for p in all_pools:
             adj[p["token0"].lower()].append(p)
             adj[p["token1"].lower()].append(p)
 
-        # Cap adjacency per token to avoid O(n^3) explosion.
-        # Major tokens (WETH, USDC) can appear in 500+ pools — uncapped this
-        # produces billions of iterations and hangs indefinitely.
-        MAX_ADJ = 20
+        # Pick the top-100 most-connected tokens as triangle bases
+        token_counts = defaultdict(int)
+        for p in all_pools:
+            token_counts[p["token0"].lower()] += 1
+            token_counts[p["token1"].lower()] += 1
+        base_tokens = [t for t, _ in sorted(token_counts.items(), key=lambda x: x[1], reverse=True)[:100]]
+        logger.info(f"Selected {len(base_tokens)} base tokens for triangular paths")
 
+        watchlist      = []
+        needed_tokens  = set()
+        MAX_ADJ        = 20
+
+        # 1. Dual-DEX pairs (same token pair, different DEX)
+        for pair, pair_pools in by_pair.items():
+            dexes = {p["dex"] for p in pair_pools}
+            if len(dexes) < 2:
+                continue
+            needed_tokens.add(pair[0])
+            needed_tokens.add(pair[1])
+
+            # Keep the highest-liquidity pool per DEX
+            best_by_dex = {}
+            for p in pair_pools:
+                prev = best_by_dex.get(p["dex"])
+                if prev is None or p.get("liq_usd", 0) > prev.get("liq_usd", 0):
+                    best_by_dex[p["dex"]] = p
+
+            dex_names = list(best_by_dex.keys())
+            for i in range(len(dex_names)):
+                for j in range(i+1, len(dex_names)):
+                    d1, d2 = dex_names[i], dex_names[j]
+                    p1, p2 = best_by_dex[d1], best_by_dex[d2]
+                    watchlist.append({
+                        "type":     "dual",
+                        "tokens":   [p1["token0"], p1["token1"], p1["token0"]],
+                        "dexes":    [d1, d2],
+                        "pools":    [p1["pool"], p2["pool"]],
+                        "versions": [p1["type"], p2["type"]],
+                        "fees":     [p1["fee"], p2["fee"]],
+                    })
+
+        # 2. Triangular paths (A -> B -> C -> A across any DEXes)
         for base in base_tokens:
             for p1 in adj.get(base, [])[:MAX_ADJ]:
                 mid = p1["token1"].lower() if p1["token0"].lower() == base else p1["token0"].lower()
-                if mid == base: continue
+                if mid == base:
+                    continue
                 for p2 in adj.get(mid, [])[:MAX_ADJ]:
                     end = p2["token1"].lower() if p2["token0"].lower() == mid else p2["token0"].lower()
-                    if end == base or end == mid: continue
-                    # Check if there is a pool between end and base
+                    if end in (base, mid):
+                        continue
                     for p3 in adj.get(end, [])[:MAX_ADJ]:
                         final = p3["token1"].lower() if p3["token0"].lower() == end else p3["token0"].lower()
                         if final == base:
-                            needed_tokens.add(base); needed_tokens.add(mid); needed_tokens.add(end)
+                            needed_tokens.update([base, mid, end])
                             watchlist.append({
-                                "type": "triangular",
-                                "tokens": [base, mid, end, base],
-                                "dexes": [p1["dex"], p2["dex"], p3["dex"]],
-                                "pools": [p1["pool"], p2["pool"], p3["pool"]],
+                                "type":     "triangular",
+                                "tokens":   [base, mid, end, base],
+                                "dexes":    [p1["dex"], p2["dex"], p3["dex"]],
+                                "pools":    [p1["pool"], p2["pool"], p3["pool"]],
                                 "versions": [p1["type"], p2["type"], p3["type"]],
-                                "fees": [p1["fee"], p2["fee"], p3["fee"]]
+                                "fees":     [p1["fee"], p2["fee"], p3["fee"]],
                             })
 
+        # Attach symbols
         token_meta = await self.get_token_metadata(list(needed_tokens))
         for item in watchlist:
             syms = [token_meta.get(t.lower(), {}).get("symbol", t[:6]) for t in item["tokens"]]
-            if item["type"] == "dual":
-                item["symbol"] = f"{syms[0]}/{syms[1]}"
-            else:
-                item["symbol"] = " -> ".join(syms)
+            item["symbol"] = (
+                f"{syms[0]}/{syms[1]}" if item["type"] == "dual"
+                else " -> ".join(syms)
+            )
+            # Attach dec_in for executor sizing
+            item["dec_in"] = token_meta.get(item["tokens"][0].lower(), {}).get("decimals", 18)
 
         watchlist.sort(key=lambda x: (x["type"], x["symbol"]))
-
-        # Limit watchlist size for stability
         watchlist = watchlist[:500]
 
-        # Verify tokens vs pools length for all items
-        valid_watchlist = []
-        for item in watchlist:
-            if len(item["tokens"]) == len(item["pools"]) + 1:
-                valid_watchlist.append(item)
-            else:
-                logger.warning(f"Invalid watchlist item: {item['symbol']} tokens={len(item['tokens'])} pools={len(item['pools'])}")
+        # Validate token/pool length
+        valid = [
+            item for item in watchlist
+            if len(item["tokens"]) == len(item["pools"]) + 1
+        ]
+        dropped = len(watchlist) - len(valid)
+        if dropped:
+            logger.warning(f"Dropped {dropped} malformed watchlist entries")
 
         with open(WATCHLIST_PATH, "w") as f:
-            json.dump(valid_watchlist, f, indent=2)
-        logger.info(f"Watchlist updated: {len(valid_watchlist)} entries.")
+            json.dump(valid, f, indent=2)
+        logger.info(f"Watchlist: {len(valid)} entries ({sum(1 for w in valid if w['type']=='dual')} dual, {sum(1 for w in valid if w['type']=='triangular')} triangular)")
+
 
 async def update_watchlist():
     scout = OnChainScout()
-    await scout.scan_factories()
+    await scout.refresh_pools()
     await scout.filter_and_build_watchlist()
+
 
 if __name__ == "__main__":
     asyncio.run(update_watchlist())

@@ -479,10 +479,11 @@ def main():
     parser.add_argument("--host",   type=str, default="0.0.0.0")
     args = parser.parse_args()
 
-    # Add real-time log tailing
-    handler = LogTailer(socketio)
-    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
-    logger.addHandler(handler)
+    # Add real-time log tailing (guard against duplicate registration)
+    if not any(isinstance(h, LogTailer) for h in logger.handlers):
+        handler = LogTailer(socketio)
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
+        logger.addHandler(handler)
 
     threading.Thread(target=_push_loop, daemon=True, name="push").start()
 

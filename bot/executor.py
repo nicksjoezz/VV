@@ -101,7 +101,7 @@ class ArbExecutor:
 
     def _get_eth_price_usd(self) -> float:
         """Returns ETH/USD from CoinGecko public API, cached for 5 minutes."""
-        if time.time() - self._eth_price_ts < 300:
+        if time.time() - self._eth_price_ts < 600:
             return self._eth_price
 
         try:

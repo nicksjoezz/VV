@@ -44,6 +44,11 @@ def setup_logging() -> logging.Logger:
     level = getattr(logging, log_cfg["level"].upper(), logging.INFO)
     logger = logging.getLogger("arb_bot")
     logger.setLevel(level)
+    logger.propagate = False
+
+    # Guard against duplicate handlers when the module is imported multiple times
+    if logger.handlers:
+        return logger
 
     fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s",

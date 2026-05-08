@@ -161,13 +161,6 @@ function onLogLine(line) {
   addLine(line);
 }
 
-// Global socket listener
-socket.on('log_line', function(data) {
-    if (data && data.line) {
-        addLine(data.line);
-    }
-});
-
 async function startBot() {
   const r = await fetch('/api/bot/start', { method:'POST' });
   const d = await r.json();
