@@ -394,4 +394,7 @@ class ArbExecutor:
             logger.info(
                 f"[{mode.upper()}] [FAILED] {opportunity['symbol']}: {str(e)[:120]}"
             )
+            # Apply cooldown even on failure — prevents hammering the same path
+            # when txs revert or wallet is underfunded (gap stays open, bot loops).
+            self._cooldown[symbol] = time.time()
             return None
