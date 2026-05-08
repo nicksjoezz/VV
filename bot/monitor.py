@@ -276,7 +276,10 @@ class ArbMonitor:
                 # whole tokens. Config key: strategy.min_reserve_tokens (default 100).
                 # For dec=18: 100 tokens (e.g. 100 WETH / 100 PENDLE).
                 # For dec=6:  100 USDC  = $100 — keeps the check token-agnostic.
-                _min_r = (cfg("strategy", "min_reserve_tokens") or 100)
+                try:
+                    _min_r = cfg("strategy", "min_reserve_tokens") or 100
+                except (KeyError, TypeError):
+                    _min_r = 100
                 if any(
                     h["reserve_in"]  < _min_r * 10 ** h["dec_in"] or
                     h["reserve_out"] < _min_r * 10 ** h["dec_out"]
