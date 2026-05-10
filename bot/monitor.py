@@ -108,7 +108,7 @@ class ArbMonitor:
             logger.error(f"Pool token fetch failed: {e}")
 
     def get_price_from_res(self, res, ptype, meta):
-        if ptype in ("univ3", "algebra"):
+        if ptype in ("univ3", "sushiv3", "algebra"):
             sqrtP = self.w3.codec.decode(["uint160"], res[:32])[0]
             return (sqrtP / (2 ** 96)) ** 2 * (10 ** meta["dec0"] / 10 ** meta["dec1"])
         else:
@@ -141,8 +141,9 @@ class ArbMonitor:
                 ptype = item["versions"][i]
                 t0, t1 = self.pool_tokens[p_addr]
 
-                if ptype in ("univ3", "algebra"):
-                    sel = SEL_SLOT0 if ptype == "univ3" else SEL_GLOBALSTATE
+                if ptype in ("univ3", "sushiv3", "algebra"):
+                    # SushiV3 uses the same slot0() / liquidity() interface as UniV3
+                    sel = SEL_GLOBALSTATE if ptype == "algebra" else SEL_SLOT0
                     price_calls.append({"target": checksum(p_addr), "callData": sel})
                     # Extra call: liquidity() to size the flash loan
                     liq_calls.append({"target": checksum(p_addr), "callData": SEL_LIQUIDITY})
@@ -256,11 +257,12 @@ class ArbMonitor:
                     version = item["versions"][i]
                     raw_fee = item["fees"][i] or 0
                     if version in ("algebra", "camelotv3"):
-                        fee_pct = 0.0025            # Algebra default ~0.25%
+                        fee_pct = 0.0025                          # Algebra default ~0.25%
                     elif version in ("univ2", "sushiv2", "camelotv2"):
-                        fee_pct = 0.003             # standard V2 0.30%
+                        fee_pct = 0.003                           # standard V2 0.30%
                     else:
-                        fee_pct = (raw_fee or 3000) / 1_000_000  # UniV3 ppm → decimal
+                        # univ3, sushiv3 — fee is actual ppm from fee() on-chain
+                        fee_pct = (raw_fee or 3000) / 1_000_000  # ppm -> decimal
 
                     hops.append({
                         "reserve_in":  r_in,

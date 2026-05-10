@@ -51,20 +51,31 @@ ANCHOR_TOKENS = [
 
 # Maps DexScreener dexId to (version string, default fee in ppm).
 # Version strings must match executor.py's DEX_TYPE_MAP keys.
+#
+# "camelot" = Camelot V2 AMM (UniV2-style with referrer) — routes to CAMELOT_V2_ROUTER.
+#   NOTE: DexScreener may return "camelot" for BOTH V2 and V3 pools.
+#   classify_pools() corrects any V2→V3 misclassification via on-chain globalState() call.
+#
+# "sushiswap-v3" is intentionally excluded: SushiSwap V3 uses its own factory
+#   (0x1af415a1EbA07a4986a52B6f2e7dE7003D82231e). Routing via UNIV3_ROUTER computes
+#   the wrong pool address (Uniswap's factory 0x1F98431c... is hardcoded there),
+#   causing the pool to call safeTransfer on wrong tokens → 'TF' revert.
 DEXSCREENER_DEX_MAP = {
-    "uniswap":        ("univ3",   3000),
-    "uniswap-v3":     ("univ3",   3000),
-    "uniswap-v2":     ("univ2",   3000),
-    "camelot":        ("algebra", 0),
-    "camelot-v3":     ("algebra", 0),
-    "sushiswap":      ("sushiv2", 3000),
-    "sushiswap-v3":   ("univ3",   3000),
+    "uniswap":        ("univ3",     3000),
+    "uniswap-v3":     ("univ3",     3000),
+    "uniswap-v2":     ("univ2",     3000),
+    "camelot":        ("camelotv2", 3000),  # V2 AMM by default; upgraded to "algebra" if needed
+    "camelot-v3":     ("algebra",   0),     # Camelot V3 (Algebra) — confirmed V3
+    "sushiswap":      ("sushiv2",   3000),
+    "sushiswap-v3":   ("sushiv3",  3000),  # SushiSwap V3 — routes via SUSHI_V3_ROUTER
 }
 
 ERC20_ABI = json.loads('[{"constant":true,"inputs":[],"name":"symbol","outputs":[{"name":"","type":"string"}],"type":"function"},{"constant":true,"inputs":[],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"type":"function"}]')
 
-# fee() selector for Uniswap V3 pools: keccak256("fee()")[0:4]
-_SEL_FEE = "0xddca3f43"
+# Function selectors for on-chain pool type detection
+_SEL_FEE         = "0xddca3f43"   # fee()         — UniV3 pools only
+_SEL_GLOBALSTATE = "0x1ad57897"   # globalState() — Algebra / Camelot V3 pools only
+_SEL_GETRESERVES = "0x0902f1ac"   # getReserves() — UniV2 / SushiV2 / CamelotV2 pools only
 
 
 async def _discover_pools_dexscreener() -> list:
@@ -168,42 +179,112 @@ class OnChainScout:
 
     # ── V3 fee resolution ─────────────────────────────────────────────────────
 
-    def resolve_v3_fees(self, pools: list) -> list:
+    def classify_pools(self, pools: list) -> list:
         """
-        Replace default fee values for univ3 pools with the actual on-chain fee().
-        One Multicall3 batch = one RPC call for all V3 pools.
+        Single Multicall3 batch that verifies every pool's type on-chain and
+        reclassifies or drops pools that don't match their DexScreener label.
+
+        DexScreener uses the SAME dexId for multiple protocol versions:
+          "uniswap" / "uniswap-v3" = UniV3         (default → "univ3")
+          "camelot"                 = V2 OR V3/Algebra (default → "camelotv2")
+          "sushiswap"               = V2 OR V3        (default → "sushiv2")
+
+        Per-type checks performed:
+          univ3    : fee()         succeeds → confirmed UniV3, update fee value
+                                   fails   → not a real UniV3 pool → DROP
+          camelotv2: globalState() succeeds → actually Algebra/V3 → upgrade to "algebra"
+                     getReserves() succeeds → confirmed V2 → keep as "camelotv2"
+                     both fail             → unknown/unsupported → DROP
+          sushiv2  : getReserves() succeeds → confirmed SushiSwap V2 → keep
+                                   fails   → SushiSwap V3 (its own factory, unsupported
+                                             router) → DROP to prevent 'TF' errors
         """
         MC3_ABI = json.loads('[{"inputs":[{"internalType":"bool","name":"requireSuccess","type":"bool"},{"components":[{"internalType":"address","name":"target","type":"address"},{"internalType":"bytes","name":"callData","type":"bytes"}],"internalType":"struct Multicall3.Call[]","name":"calls","type":"tuple[]"}],"name":"tryAggregate","outputs":[{"components":[{"internalType":"bool","name":"success","type":"bool"},{"internalType":"bytes","name":"returnData","type":"bytes"}],"internalType":"struct Multicall3.Result[]","name":"returnData","type":"tuple[]"}],"stateMutability":"payable","type":"function"}]')
         mc = self.w3.eth.contract(address=checksum(MULTICALL3_ADDR), abi=MC3_ABI)
 
-        v3_idx   = [i for i, p in enumerate(pools) if p["type"] == "univ3"]
-        v3_pools = [pools[i] for i in v3_idx]
-        if not v3_pools:
+        calls = []
+        meta  = []   # (pool_index, check_label)
+
+        for i, p in enumerate(pools):
+            ptype = p["type"]
+            if ptype in ("univ3", "sushiv3"):
+                # Both use fee() to confirm they're real V3 pools and get actual fee tier
+                calls.append({"target": checksum(p["pool"]), "callData": _SEL_FEE})
+                meta.append((i, "fee"))
+            elif ptype == "camelotv2":
+                # Two probes: globalState (Algebra V3) and getReserves (V2 AMM)
+                calls.append({"target": checksum(p["pool"]), "callData": _SEL_GLOBALSTATE})
+                meta.append((i, "camelot_gs"))
+                calls.append({"target": checksum(p["pool"]), "callData": _SEL_GETRESERVES})
+                meta.append((i, "camelot_rv"))
+            elif ptype == "sushiv2":
+                calls.append({"target": checksum(p["pool"]), "callData": _SEL_GETRESERVES})
+                meta.append((i, "reserves"))
+
+        if not calls:
             return pools
 
-        calls = [{"target": checksum(p["pool"]), "callData": _SEL_FEE} for p in v3_pools]
         try:
             results = mc.functions.tryAggregate(False, calls).call()
-            resolved = 0
-            for j, (success, data) in enumerate(results):
-                if success and data:
-                    try:
-                        fee = self.w3.codec.decode(["uint24"], data)[0]
-                        pools[v3_idx[j]]["fee"] = fee
-                        resolved += 1
-                    except Exception:
-                        pass
-            logger.info(f"V3 fee resolution: {resolved}/{len(v3_pools)} pools resolved")
         except Exception as e:
-            logger.warning(f"V3 fee resolution failed (using defaults): {e}")
+            logger.warning(f"Pool classification failed (keeping defaults): {e}")
+            return pools
 
+        # Accumulate per-pool results: pool_index -> {label: success}
+        pool_checks: dict = {}
+        pool_data:   dict = {}
+        for (success, data), (pool_i, label) in zip(results, meta):
+            pool_checks.setdefault(pool_i, {})[label] = success
+            pool_data.setdefault(pool_i, {})[label]   = data
+
+        fee_resolved = upgraded = dropped = 0
+
+        for pool_i, checks in pool_checks.items():
+            p = pools[pool_i]
+
+            if "fee" in checks:
+                if checks["fee"] and pool_data[pool_i].get("fee"):
+                    try:
+                        fee = self.w3.codec.decode(["uint24"], pool_data[pool_i]["fee"])[0]
+                        p["fee"] = fee
+                        fee_resolved += 1
+                    except Exception:
+                        p["_drop"] = True
+                        dropped += 1
+                else:
+                    p["_drop"] = True   # not a real UniV3 pool
+                    dropped += 1
+
+            elif "camelot_gs" in checks:
+                if checks["camelot_gs"]:
+                    p["type"] = "algebra"
+                    p["fee"]  = 0
+                    upgraded += 1
+                elif checks.get("camelot_rv"):
+                    pass   # confirmed Camelot V2, keep
+                else:
+                    p["_drop"] = True   # neither V2 nor V3 → unknown
+                    dropped += 1
+
+            elif "reserves" in checks:
+                if not checks["reserves"]:
+                    p["_drop"] = True   # SushiSwap V3 — no supported router
+                    dropped += 1
+
+        pools = [p for p in pools if not p.get("_drop")]
+
+        logger.info(
+            f"Pool classification: {fee_resolved} UniV3 fees resolved, "
+            f"{upgraded} Camelot pools upgraded V2->Algebra, "
+            f"{dropped} pools dropped (unsupported/fake)"
+        )
         return pools
 
     # ── Pool refresh ──────────────────────────────────────────────────────────
 
     async def refresh_pools(self):
         pools = await _discover_pools_dexscreener()
-        pools = self.resolve_v3_fees(pools)
+        pools = self.classify_pools(pools)
         self._save_cache(pools)
 
     # ── Token metadata ────────────────────────────────────────────────────────
@@ -246,41 +327,42 @@ class OnChainScout:
 
     async def filter_and_build_watchlist(self):
         all_pools = self.pool_cache.get("pools", [])
-        logger.info(f"Building watchlist from {len(all_pools)} DexScreener pools")
+        logger.info(f"Building watchlist from {len(all_pools)} verified pools")
 
-        # Group pools by sorted token pair
+        # ── Adjacency graph sorted by liquidity (best pools first) ──────────
+        adj    = defaultdict(list)
         by_pair = defaultdict(list)
         for p in all_pools:
-            pair = tuple(sorted([p["token0"].lower(), p["token1"].lower()]))
-            by_pair[pair].append(p)
+            t0 = p["token0"].lower()
+            t1 = p["token1"].lower()
+            adj[t0].append(p)
+            adj[t1].append(p)
+            by_pair[tuple(sorted([t0, t1]))].append(p)
 
-        # Build adjacency list for triangular path search
-        adj = defaultdict(list)
-        for p in all_pools:
-            adj[p["token0"].lower()].append(p)
-            adj[p["token1"].lower()].append(p)
+        for t in adj:
+            adj[t].sort(key=lambda p: p.get("liq_usd", 0), reverse=True)
 
-        # Pick the top-100 most-connected tokens as triangle bases
+        # Top-150 most-connected tokens as triangular bases
         token_counts = defaultdict(int)
         for p in all_pools:
             token_counts[p["token0"].lower()] += 1
             token_counts[p["token1"].lower()] += 1
-        base_tokens = [t for t, _ in sorted(token_counts.items(), key=lambda x: x[1], reverse=True)[:100]]
+        base_tokens = [
+            t for t, _ in sorted(token_counts.items(), key=lambda x: x[1], reverse=True)[:150]
+        ]
         logger.info(f"Selected {len(base_tokens)} base tokens for triangular paths")
 
-        watchlist      = []
-        needed_tokens  = set()
-        MAX_ADJ        = 20
+        watchlist     = []
+        seen_paths    = set()
+        needed_tokens = set()
 
-        # 1. Dual-DEX pairs (same token pair, different DEX)
+        # Max pools per leg in triangular search — sorted by liq so top-30
+        # always means highest-liquidity pools first, not arbitrary ordering.
+        MAX_LEG = 30
+
+        # ── 1. Dual-DEX: same pair on different exchanges ────────────────────
         for pair, pair_pools in by_pair.items():
-            dexes = {p["dex"] for p in pair_pools}
-            if len(dexes) < 2:
-                continue
-            needed_tokens.add(pair[0])
-            needed_tokens.add(pair[1])
-
-            # Keep the highest-liquidity pool per DEX
+            # Best pool per DEX for this pair (by liquidity)
             best_by_dex = {}
             for p in pair_pools:
                 prev = best_by_dex.get(p["dex"])
@@ -288,43 +370,91 @@ class OnChainScout:
                     best_by_dex[p["dex"]] = p
 
             dex_names = list(best_by_dex.keys())
+            if len(dex_names) < 2:
+                continue
+
+            needed_tokens.add(pair[0])
+            needed_tokens.add(pair[1])
+
             for i in range(len(dex_names)):
-                for j in range(i+1, len(dex_names)):
+                for j in range(i + 1, len(dex_names)):
                     d1, d2 = dex_names[i], dex_names[j]
                     p1, p2 = best_by_dex[d1], best_by_dex[d2]
+                    key = (p1["pool"], p2["pool"])
+                    if key in seen_paths:
+                        continue
+                    seen_paths.add(key)
+
+                    min_liq = min(p1.get("liq_usd", 0), p2.get("liq_usd", 0))
                     watchlist.append({
                         "type":     "dual",
-                        "tokens":   [p1["token0"], p1["token1"], p1["token0"]],
+                        "tokens":   [pair[0], pair[1], pair[0]],
                         "dexes":    [d1, d2],
                         "pools":    [p1["pool"], p2["pool"]],
                         "versions": [p1["type"], p2["type"]],
                         "fees":     [p1["fee"], p2["fee"]],
+                        "min_liq":  min_liq,
+                        "n_dexes":  2,
                     })
 
-        # 2. Triangular paths (A -> B -> C -> A across any DEXes)
+        # ── 2. Triangular + cross-DEX: A -> B -> C -> A ──────────────────────
+        # For every (A,B,C) triple reachable within the top-liq adjacency lists,
+        # ALL pool combinations are generated — including paths that use the same
+        # token triple but route through different DEXes on each leg.
+        # This captures cross-DEX triangular arb (e.g. buy on Camelot, sell on Uni).
         for base in base_tokens:
-            for p1 in adj.get(base, [])[:MAX_ADJ]:
+            for p1 in adj.get(base, [])[:MAX_LEG]:
                 mid = p1["token1"].lower() if p1["token0"].lower() == base else p1["token0"].lower()
                 if mid == base:
                     continue
-                for p2 in adj.get(mid, [])[:MAX_ADJ]:
+
+                for p2 in adj.get(mid, [])[:MAX_LEG]:
                     end = p2["token1"].lower() if p2["token0"].lower() == mid else p2["token0"].lower()
                     if end in (base, mid):
                         continue
-                    for p3 in adj.get(end, [])[:MAX_ADJ]:
-                        final = p3["token1"].lower() if p3["token0"].lower() == end else p3["token0"].lower()
-                        if final == base:
-                            needed_tokens.update([base, mid, end])
-                            watchlist.append({
-                                "type":     "triangular",
-                                "tokens":   [base, mid, end, base],
-                                "dexes":    [p1["dex"], p2["dex"], p3["dex"]],
-                                "pools":    [p1["pool"], p2["pool"], p3["pool"]],
-                                "versions": [p1["type"], p2["type"], p3["type"]],
-                                "fees":     [p1["fee"], p2["fee"], p3["fee"]],
-                            })
 
-        # Attach symbols
+                    for p3 in adj.get(end, [])[:MAX_LEG]:
+                        final = p3["token1"].lower() if p3["token0"].lower() == end else p3["token0"].lower()
+                        if final != base:
+                            continue
+
+                        key = (p1["pool"], p2["pool"], p3["pool"])
+                        if key in seen_paths:
+                            continue
+                        seen_paths.add(key)
+
+                        needed_tokens.update([base, mid, end])
+                        dexes   = [p1["dex"], p2["dex"], p3["dex"]]
+                        min_liq = min(
+                            p1.get("liq_usd", 0),
+                            p2.get("liq_usd", 0),
+                            p3.get("liq_usd", 0),
+                        )
+                        watchlist.append({
+                            "type":     "triangular",
+                            "tokens":   [base, mid, end, base],
+                            "dexes":    dexes,
+                            "pools":    [p1["pool"], p2["pool"], p3["pool"]],
+                            "versions": [p1["type"], p2["type"], p3["type"]],
+                            "fees":     [p1["fee"], p2["fee"], p3["fee"]],
+                            "min_liq":  min_liq,
+                            "n_dexes":  len(set(dexes)),
+                        })
+
+        logger.info(
+            f"Discovered {len(watchlist)} raw paths "
+            f"({sum(1 for w in watchlist if w['type']=='dual')} dual, "
+            f"{sum(1 for w in watchlist if w['type']=='triangular')} triangular)"
+        )
+
+        # ── Rank: cross-DEX paths first, then by minimum pool liquidity ──────
+        # Paths using more unique DEXes have higher cross-exchange price divergence
+        # potential. Within the same n_dexes tier, higher min liquidity = more
+        # reliable execution (less slippage, harder to drain in one flash loan).
+        watchlist.sort(key=lambda x: (-x["n_dexes"], -x["min_liq"]))
+        watchlist = watchlist[:2000]
+
+        # ── Attach token metadata ─────────────────────────────────────────────
         token_meta = await self.get_token_metadata(list(needed_tokens))
         for item in watchlist:
             syms = [token_meta.get(t.lower(), {}).get("symbol", t[:6]) for t in item["tokens"]]
@@ -332,24 +462,29 @@ class OnChainScout:
                 f"{syms[0]}/{syms[1]}" if item["type"] == "dual"
                 else " -> ".join(syms)
             )
-            # Attach dec_in for executor sizing
             item["dec_in"] = token_meta.get(item["tokens"][0].lower(), {}).get("decimals", 18)
 
-        watchlist.sort(key=lambda x: (x["type"], x["symbol"]))
-        watchlist = watchlist[:500]
-
-        # Validate token/pool length
+        # ── Validate structure ────────────────────────────────────────────────
         valid = [
             item for item in watchlist
             if len(item["tokens"]) == len(item["pools"]) + 1
         ]
-        dropped = len(watchlist) - len(valid)
-        if dropped:
-            logger.warning(f"Dropped {dropped} malformed watchlist entries")
+        n_dropped = len(watchlist) - len(valid)
+        if n_dropped:
+            logger.warning(f"Dropped {n_dropped} malformed watchlist entries")
 
         with open(WATCHLIST_PATH, "w") as f:
             json.dump(valid, f, indent=2)
-        logger.info(f"Watchlist: {len(valid)} entries ({sum(1 for w in valid if w['type']=='dual')} dual, {sum(1 for w in valid if w['type']=='triangular')} triangular)")
+
+        n_dual  = sum(1 for w in valid if w["type"] == "dual")
+        n_tri   = sum(1 for w in valid if w["type"] == "triangular")
+        n_xdex  = sum(1 for w in valid if w.get("n_dexes", 1) > 1)
+        n_xdex3 = sum(1 for w in valid if w.get("n_dexes", 1) == 3)
+        logger.info(
+            f"Watchlist: {len(valid)} entries | "
+            f"{n_dual} dual | {n_tri} triangular | "
+            f"{n_xdex} cross-DEX ({n_xdex3} use 3 different exchanges)"
+        )
 
 
 async def update_watchlist():

@@ -39,8 +39,9 @@ DEX_TYPE_MAP = {
     "univ3":     1,
     "camelotv2": 2,
     "camelotv3": 3,
-    "algebra":   3,
+    "algebra":   3,   # Camelot V3 / Algebra pools → same router as camelotv3
     "sushiv2":   4,
+    "sushiv3":   5,   # SushiSwap V3 — must use SUSHI_V3_ROUTER (own factory)
 }
 
 _COINGECKO_URL = (
