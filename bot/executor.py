@@ -173,12 +173,10 @@ class ArbExecutor:
             )
             return False, profit_usd, 0.0
 
-        # 1c. Gap sanity cap — a gap above 5% in a multi-hop path almost always
-        #     means a scam/honeypot token is creating a fake price signal.
-        #     Legitimate liquid-market arb rarely exceeds 2-3%.
-        if gap > 0.05:
+        # 1c. Gap sanity cap at 50% — only blocks clearly fake/scam price signals
+        if gap > 0.50:
             logger.warning(
-                f"Skip {opportunity['symbol']}: gap {gap:.2%} > 5% sanity cap"
+                f"Skip {opportunity['symbol']}: gap {gap:.2%} > 50% sanity cap"
             )
             return False, profit_usd, 0.0
 
